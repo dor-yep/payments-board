@@ -21,6 +21,8 @@ export interface ActualPaymentItem {
 
 export interface ContractualPaymentItem {
   id: string;
+  name: string;
+  paymentOrder: number; // 1, 2, 3, 4... from item name
   paymentDue: number;
   indexationPaymentDue: number;
   interestPaymentDue: number;
@@ -153,7 +155,7 @@ export async function findMatchingContractualItems(
 ): Promise<ContractualPaymentItem[]> {
   logger.info('Finding contractual payment items for contract', { contractId });
 
-  const allItems: Array<{ id: string; column_values: Array<{ id: string; value: string }> }> = [];
+  const allItems: Array<{ id: string; name: string; column_values: Array<{ id: string; value: string }> }> = [];
   let cursor: string | null = null;
 
   do {
@@ -163,8 +165,9 @@ export async function findMatchingContractualItems(
           next_items_page(cursor: $cursor, limit: 500) {
             cursor
             items {
-              id
-              column_values(ids: ["${CONTRACTUAL_PAYMENTS.items.contractLink}", "${CONTRACTUAL_PAYMENTS.items.paymentDue}", "${CONTRACTUAL_PAYMENTS.items.indexationPaymentDue}", "${CONTRACTUAL_PAYMENTS.items.interestPaymentDue}"]) {
+                id
+                name
+                column_values(ids: ["${CONTRACTUAL_PAYMENTS.items.contractLink}", "${CONTRACTUAL_PAYMENTS.items.paymentDue}", "${CONTRACTUAL_PAYMENTS.items.indexationPaymentDue}", "${CONTRACTUAL_PAYMENTS.items.interestPaymentDue}"]) {
                 id
                 value
               }
@@ -177,13 +180,14 @@ export async function findMatchingContractualItems(
           boards(ids: [$boardId]) {
             items_page(limit: 500) {
               cursor
-              items {
+            items {
                 id
+                name
                 column_values(ids: ["${CONTRACTUAL_PAYMENTS.items.contractLink}", "${CONTRACTUAL_PAYMENTS.items.paymentDue}", "${CONTRACTUAL_PAYMENTS.items.indexationPaymentDue}", "${CONTRACTUAL_PAYMENTS.items.interestPaymentDue}"]) {
-                  id
-                  value
-                }
+                id
+                value
               }
+            }
             }
           }
         }
@@ -224,6 +228,12 @@ export async function findMatchingContractualItems(
     return [];
   }
 
+  /** Parse payment order from item name: "1" -> 1, "2 5" -> 2, "3 1" -> 3, "4" -> 4 */
+  function parsePaymentOrder(name: string): number {
+    const match = name?.trim().match(/^(\d+)/);
+    return match ? parseInt(match[1], 10) : 999;
+  }
+
   const contractual: ContractualPaymentItem[] = items.map((item) => {
     let paymentDue = 0;
     let indexationPaymentDue = 0;
@@ -247,9 +257,12 @@ export async function findMatchingContractualItems(
     const principal = round(Math.max(0, paymentDue - indexationPaymentDue - interestPaymentDue));
     const interest = round(interestPaymentDue);
     const indexation = round(indexationPaymentDue);
+    const paymentOrder = parsePaymentOrder(item.name ?? '');
 
     return {
       id: item.id,
+      name: item.name ?? '',
+      paymentOrder,
       paymentDue,
       indexationPaymentDue,
       interestPaymentDue,
@@ -259,10 +272,14 @@ export async function findMatchingContractualItems(
     };
   });
 
-  // Sort by payment due (ascending) to process in schedule order
-  contractual.sort((a, b) => a.paymentDue - b.paymentDue);
+  // Sort by payment order (1, 2, 3, 4...) so we fill the first payment before moving to the next
+  contractual.sort((a, b) => a.paymentOrder - b.paymentOrder);
 
-  logger.info('Found contractual items', { contractId, count: contractual.length, ids: contractual.map((c) => c.id) });
+  logger.info('Found contractual items (by payment order)', {
+    contractId,
+    count: contractual.length,
+    order: contractual.map((c) => `${c.paymentOrder}:${c.name}`),
+  });
 
   return contractual;
 }
