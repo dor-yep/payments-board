@@ -36,7 +36,10 @@ function getActualPaymentItemId(event: Record<string, unknown>): string | null {
   return null;
 }
 
-const applyPaymentHandler = async (req: Request, res: Response) => {
+router.post('/apply-payment', mondayWebhookAuth, applyPaymentHandler);
+router.post('/apply-payment/', mondayWebhookAuth, applyPaymentHandler);
+
+async function applyPaymentHandler(req: Request, res: Response) {
   const body = req.body;
 
   if (body.challenge) {
@@ -85,9 +88,6 @@ const applyPaymentHandler = async (req: Request, res: Response) => {
       error: err instanceof Error ? err.message : 'Internal server error',
     });
   }
-};
-
-router.post('/apply-payment', mondayWebhookAuth, applyPaymentHandler);
-router.post('/apply-payment/', mondayWebhookAuth, applyPaymentHandler);
+}
 
 export default router;
