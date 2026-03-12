@@ -2,7 +2,7 @@ export const CONTRACTUAL_PAYMENTS = {
   boardId: "5092167973",
   items: {
     paymentDue: "numeric_mm0tv8dx",
-    indexationPaymentDue: "numeric_mm14mht9",
+    indexationPaymentDue: "numeric_mm117vgw",
     interestPaymentDue: "numeric_mm184vaa",
     interestPercent: "numeric_mm19xy22",
     /** Contract link column - links to the same contract as Actual Payments */
