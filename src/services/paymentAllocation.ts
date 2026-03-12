@@ -60,6 +60,24 @@ function round(value: number): number {
   return Math.round(value * 10 ** ROUND) / 10 ** ROUND;
 }
 
+/** Parse linked item IDs from board relation column value (handles various API formats) */
+function parseBoardRelationIds(value: string | null | undefined): number[] {
+  if (!value?.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    const ids = parsed.linkedPulseIds ?? parsed.item_ids ?? parsed.linked_item_ids ?? [];
+    return (Array.isArray(ids) ? ids : [])
+      .map((x: { linkedPulseId?: number | string } | number | string) => {
+        if (typeof x === 'number') return x;
+        if (typeof x === 'string') return parseInt(x, 10);
+        return typeof x.linkedPulseId === 'number' ? x.linkedPulseId : parseInt(String(x.linkedPulseId ?? ''), 10);
+      })
+      .filter((id): id is number => !isNaN(id));
+  } catch {
+    return [];
+  }
+}
+
 // ─── Fetch actual payment item ──────────────────────────────────────────────
 
 export async function fetchActualPaymentItem(
@@ -71,16 +89,20 @@ export async function fetchActualPaymentItem(
     query GetActualPayment($itemId: ID!) {
       items(ids: [$itemId]) {
         id
-        column_values(ids: ["${ACTUAL_PAYMENTS.columns.receiptAmount}", "${ACTUAL_PAYMENTS.columns.receiptDate}", "${ACTUAL_PAYMENTS.columns.contracts}"]) {
+        column_values(ids: ["${ACTUAL_PAYMENTS.columns.receiptAmount}", "${ACTUAL_PAYMENTS.columns.receiptDate}", "${ACTUAL_PAYMENTS.columns.contracts}", "${ACTUAL_PAYMENTS.columns.contractId}"]) {
           id
           value
           type
+          ... on BoardRelationValue {
+            linked_item_ids
+          }
         }
       }
     }
   `;
 
-  const data = await mondayQuery<{ items: Array<{ id: string; column_values: Array<{ id: string; value: string; type: string }> }> }>(query, { itemId: parseInt(itemId, 10) });
+  type ColumnValue = { id: string; value?: string | null; type: string; linked_item_ids?: string[] };
+  const data = await mondayQuery<{ items: Array<{ id: string; column_values: ColumnValue[] }> }>(query, { itemId: parseInt(itemId, 10) });
 
   const item = data.items?.[0];
   if (!item) {
@@ -91,6 +113,7 @@ export async function fetchActualPaymentItem(
   let receiptAmount = 0;
   let receiptDate: string | null = null;
   let linkedContractIds: number[] = [];
+  let contractIdText: string | null = null;
 
   for (const cv of item.column_values) {
     if (cv.id === ACTUAL_PAYMENTS.columns.receiptAmount) {
@@ -98,7 +121,7 @@ export async function fetchActualPaymentItem(
         const parsed = JSON.parse(cv.value || '{}');
         receiptAmount = parseFloat(parsed.value ?? parsed) || 0;
       } catch {
-        receiptAmount = parseFloat(cv.value) || 0;
+        receiptAmount = parseFloat(cv.value ?? '') || 0;
       }
     } else if (cv.id === ACTUAL_PAYMENTS.columns.receiptDate) {
       try {
@@ -108,17 +131,30 @@ export async function fetchActualPaymentItem(
         receiptDate = cv.value || null;
       }
     } else if (cv.id === ACTUAL_PAYMENTS.columns.contracts) {
+      // API 2025-04+ returns value: null for board_relation; use linked_item_ids instead
+      const ids = (cv as ColumnValue).linked_item_ids;
+      if (ids?.length) {
+        linkedContractIds = ids.map((id) => parseInt(id, 10)).filter((id) => !isNaN(id));
+      } else {
+        linkedContractIds = parseBoardRelationIds(cv.value ?? null);
+      }
+    } else if (cv.id === ACTUAL_PAYMENTS.columns.contractId) {
       try {
         const parsed = JSON.parse(cv.value || '{}');
-        const ids = parsed.linkedPulseIds ?? parsed.item_ids ?? [];
-        linkedContractIds = Array.isArray(ids)
-          ? ids.map((x: { linkedPulseId?: number } | number) =>
-              typeof x === 'number' ? x : x.linkedPulseId
-            ).filter((id): id is number => typeof id === 'number')
-          : [];
+        contractIdText = parsed.text ?? parsed.value ?? (typeof cv.value === 'string' ? cv.value : null);
       } catch {
-        linkedContractIds = [];
+        contractIdText = typeof cv.value === 'string' ? cv.value : null;
       }
+      if (contractIdText && typeof contractIdText !== 'string') contractIdText = String(contractIdText);
+    }
+  }
+
+  // Fallback: if board relation is empty but contractId text column has a value, use it
+  if (linkedContractIds.length === 0 && contractIdText?.trim()) {
+    const parsed = parseInt(contractIdText.trim(), 10);
+    if (!isNaN(parsed)) {
+      linkedContractIds = [parsed];
+      logger.info('Using contractId text column as fallback', { contractIdText, linkedContractIds });
     }
   }
 
@@ -155,7 +191,8 @@ export async function findMatchingContractualItems(
 ): Promise<ContractualPaymentItem[]> {
   logger.info('Finding contractual payment items for contract', { contractId });
 
-  const allItems: Array<{ id: string; name: string; column_values: Array<{ id: string; value: string }> }> = [];
+  type ContractualColumnValue = { id: string; value?: string | null; linked_item_ids?: string[] };
+  const allItems: Array<{ id: string; name: string; column_values: ContractualColumnValue[] }> = [];
   let cursor: string | null = null;
 
   do {
@@ -170,6 +207,9 @@ export async function findMatchingContractualItems(
                 column_values(ids: ["${CONTRACTUAL_PAYMENTS.items.contractLink}", "${CONTRACTUAL_PAYMENTS.items.paymentDue}", "${CONTRACTUAL_PAYMENTS.items.indexationPaymentDue}", "${CONTRACTUAL_PAYMENTS.items.interestPaymentDue}"]) {
                 id
                 value
+                ... on BoardRelationValue {
+                  linked_item_ids
+                }
               }
             }
           }
@@ -186,6 +226,9 @@ export async function findMatchingContractualItems(
                 column_values(ids: ["${CONTRACTUAL_PAYMENTS.items.contractLink}", "${CONTRACTUAL_PAYMENTS.items.paymentDue}", "${CONTRACTUAL_PAYMENTS.items.indexationPaymentDue}", "${CONTRACTUAL_PAYMENTS.items.interestPaymentDue}"]) {
                 id
                 value
+                ... on BoardRelationValue {
+                  linked_item_ids
+                }
               }
             }
             }
@@ -208,14 +251,21 @@ export async function findMatchingContractualItems(
 
   const items = allItems.filter((item) => {
     const cv = item.column_values.find((c) => c.id === CONTRACTUAL_PAYMENTS.items.contractLink);
-    if (!cv?.value) return false;
+    if (!cv) return false;
+    // API 2025-04+ returns value: null for board_relation; use linked_item_ids instead
+    const ids = cv.linked_item_ids;
+    if (ids?.length) {
+      const linked = ids.map((id) => parseInt(id, 10)).filter((id) => !isNaN(id));
+      return linked.includes(contractId);
+    }
+    if (!cv.value) return false;
     try {
       const parsed = JSON.parse(cv.value);
-      const ids = parsed.linkedPulseIds ?? parsed.item_ids ?? [];
-      const linked = Array.isArray(ids)
-        ? ids.map((x: { linkedPulseId?: number } | number) =>
+      const parsedIds = parsed.linkedPulseIds ?? parsed.item_ids ?? [];
+      const linked = Array.isArray(parsedIds)
+        ? parsedIds.map((x: { linkedPulseId?: number } | number) =>
             typeof x === 'number' ? x : x.linkedPulseId
-          )
+          ).filter((id): id is number => typeof id === 'number')
         : [];
       return linked.includes(contractId);
     } catch {
@@ -247,7 +297,7 @@ export async function findMatchingContractualItems(
         else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexationPaymentDue) indexationPaymentDue = val;
         else if (cv.id === CONTRACTUAL_PAYMENTS.items.interestPaymentDue) interestPaymentDue = val;
       } catch {
-        const val = parseFloat(cv.value) || 0;
+        const val = parseFloat(cv.value ?? '') || 0;
         if (cv.id === CONTRACTUAL_PAYMENTS.items.paymentDue) paymentDue = val;
         else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexationPaymentDue) indexationPaymentDue = val;
         else if (cv.id === CONTRACTUAL_PAYMENTS.items.interestPaymentDue) interestPaymentDue = val;
@@ -392,14 +442,15 @@ export function createSubitemPayload(
   actualAmountAllocated: number
 ): SubitemPayload {
   const sub = CONTRACTUAL_PAYMENTS.subitems;
-  const columnValues: Record<string, unknown> = {
-    [sub.name]: paymentDate,
-    [sub.actualReceipt]: { value: String(actualAmountAllocated) },
-    [sub.interest]: { value: String(allocation.interestPaid) },
-    [sub.indexLinkage]: { value: String(allocation.indexationPaid) },
-    [sub.remainingPrincipal]: { value: String(allocation.remainingPrincipal) },
-    [sub.remainingInterest]: { value: String(allocation.remainingInterest) },
-    [sub.remainingIndexLinkage]: { value: String(allocation.remainingIndexation) },
+  // Monday API expects numeric columns as plain strings: "column_id": "123"
+  // Name is set via item_name; only set numeric columns in column_values
+  const columnValues: Record<string, string> = {
+    [sub.actualReceipt]: String(actualAmountAllocated),
+    [sub.interest]: String(allocation.interestPaid),
+    [sub.indexLinkage]: String(allocation.indexationPaid),
+    [sub.remainingPrincipal]: String(allocation.remainingPrincipal),
+    [sub.remainingInterest]: String(allocation.remainingInterest),
+    [sub.remainingIndexLinkage]: String(allocation.remainingIndexation),
   };
   return {
     name: paymentDate,
