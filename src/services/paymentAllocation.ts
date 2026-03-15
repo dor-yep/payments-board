@@ -4,7 +4,8 @@
  *
  * Interest and indexation balances are calculated per payment from:
  * - Interest: Remaining_Principal × (r/365) × Late_Days + previous remaining interest
- * - Indexation: Remaining_Principal × (Current_Index/Base_Index - 1) + previous remaining indexation
+ * - Indexation: Remaining_Principal × (Current_Index/Previous_Index - 1) + previous remaining indexation
+ *   (Previous_Index = contract base for first subitem, index from previous subitem's payment date for rest)
  */
 
 import { mondayQuery } from './mondayApi';
@@ -566,6 +567,8 @@ interface PreviousSubitemBalances {
   remainingPrincipal: number;
   remainingInterest: number;
   remainingIndexation: number;
+  /** Payment date of previous subitem (name), for index lookup. Null if first subitem. */
+  previousSubitemPaymentDate: string | null;
 }
 
 export async function getPreviousSubitemBalances(
@@ -577,6 +580,7 @@ export async function getPreviousSubitemBalances(
     query GetSubitems($parentId: ID!) {
       items(ids: [$parentId]) {
         subitems {
+          name
           column_values(ids: ["${sub.remainingPrincipal}", "${sub.remainingInterest}", "${sub.remainingIndexLinkage}"]) {
             id
             value
@@ -590,6 +594,7 @@ export async function getPreviousSubitemBalances(
   const data = await mondayQuery<{
     items: Array<{
       subitems: Array<{
+        name: string;
         column_values: Array<{ id: string; value: string }>;
         created_at: string;
       }>;
@@ -602,6 +607,7 @@ export async function getPreviousSubitemBalances(
       remainingPrincipal: parentOriginalPrincipal,
       remainingInterest: 0,
       remainingIndexation: 0,
+      previousSubitemPaymentDate: null,
     };
   }
 
@@ -628,7 +634,22 @@ export async function getPreviousSubitemBalances(
     }
   }
 
-  return { remainingPrincipal, remainingInterest, remainingIndexation };
+  const previousSubitemPaymentDate = latest.name?.trim() || null;
+
+  return {
+    remainingPrincipal,
+    remainingInterest,
+    remainingIndexation,
+    previousSubitemPaymentDate,
+  };
+}
+
+/** Convert subitem name (e.g. "Mar 15, 2026") to ISO date for API calls */
+function parseSubitemNameToIsoDate(name: string | null): string | null {
+  if (!name?.trim()) return null;
+  const d = new Date(name);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
 }
 
 // ─── Compute interest (7-day grace) ───────────────────────────────────────────
@@ -698,27 +719,27 @@ function computeLateInterest(
 function computeIndexationBalance(
   remainingPrincipal: number,
   currentIndex: number,
-  baseIndex: number
+  previousIndex: number
 ): number {
-  if (remainingPrincipal <= 0 || baseIndex <= 0) {
+  if (remainingPrincipal <= 0 || previousIndex <= 0) {
     logger.info('Indexation calculation skipped', {
-      reason: remainingPrincipal <= 0 ? 'remaining principal <= 0' : 'base index <= 0',
+      reason: remainingPrincipal <= 0 ? 'remaining principal <= 0' : 'previous index <= 0',
       remainingPrincipal,
-      baseIndex,
+      previousIndex,
     });
     return 0;
   }
-  const ratio = currentIndex / baseIndex;
+  const ratio = currentIndex / previousIndex;
   const indexation = remainingPrincipal * (ratio - 1);
   const result = round(indexation);
 
   logger.info('Indexation calculation', {
-    formula: 'Indexation = Remaining_Principal × (Current_Index / Base_Index - 1)',
+    formula: 'Indexation = Remaining_Principal × (Current_Index / Previous_Index - 1)',
     values: {
       remainingPrincipal,
       currentIndex,
-      baseIndex,
-      ratio: `${currentIndex} / ${baseIndex} = ${ratio.toFixed(4)}`,
+      previousIndex,
+      ratio: `${currentIndex} / ${previousIndex} = ${ratio.toFixed(4)}`,
     },
     calculation: `${remainingPrincipal} × (${ratio.toFixed(4)} - 1) = ${remainingPrincipal} × ${(ratio - 1).toFixed(4)} = ${result}`,
     result,
@@ -740,7 +761,22 @@ export async function computeBalancesBeforePayment(
 
   const remainingPrincipalBefore = previous.remainingPrincipal;
   const interestRatePercent = contractDetails?.interestRatePercent ?? 0;
-  const baseIndex = contractDetails?.baseIndex ?? 100;
+  const contractBaseIndex = contractDetails?.baseIndex ?? 100;
+
+  let previousIndex: number;
+  if (!previous.previousSubitemPaymentDate) {
+    previousIndex = contractBaseIndex;
+  } else {
+    const prevDateIso = parseSubitemNameToIsoDate(previous.previousSubitemPaymentDate);
+    const prevIndexResult = prevDateIso ? await fetchIndexForPaymentDate(prevDateIso) : null;
+    previousIndex = prevIndexResult?.value ?? contractBaseIndex;
+    if (!prevIndexResult && prevDateIso) {
+      logger.warn('Could not fetch index for previous subitem date, falling back to contract base index', {
+        previousSubitemPaymentDate: previous.previousSubitemPaymentDate,
+        contractBaseIndex,
+      });
+    }
+  }
 
   const calculatedInterest = computeLateInterest(
     remainingPrincipalBefore,
@@ -751,19 +787,20 @@ export async function computeBalancesBeforePayment(
   const remainingInterestBefore = round(calculatedInterest + previous.remainingInterest);
 
   logger.info('Indexation inputs', {
-    formula: 'Indexation = Remaining_Principal × (Current_Index / Base_Index - 1)',
+    formula: 'Indexation = Remaining_Principal × (Current_Index / Previous_Index - 1)',
     remainingPrincipal: remainingPrincipalBefore,
     currentIndex,
-    baseIndex,
-    currentIndexSource: 'Indices board, determined by payment date (published 15th for previous month)',
-    baseIndexSource: 'Contracts board, from linked contract',
+    previousIndex,
+    previousIndexSource: previous.previousSubitemPaymentDate
+      ? `Index from previous subitem payment date (${previous.previousSubitemPaymentDate})`
+      : 'Contracts board base index (first subitem)',
     previousRemainingIndexation: previous.remainingIndexation,
   });
 
   const calculatedIndexation = computeIndexationBalance(
     remainingPrincipalBefore,
     currentIndex,
-    baseIndex
+    previousIndex
   );
   const remainingIndexationBefore = round(calculatedIndexation + previous.remainingIndexation);
 
