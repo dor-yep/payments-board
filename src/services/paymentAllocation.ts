@@ -369,9 +369,47 @@ export async function findMatchingContractualItems(
   return contractual;
 }
 
-// ─── Fetch latest index from Monday Indices board ───────────────────────────
-/** Item name format: "01-2026" (MM-YYYY). Returns the latest published index. */
-export async function fetchLatestIndexFromMonday(): Promise<{ value: number; period: string } | null> {
+// ─── Index period for payment date ───────────────────────────────────────────
+/**
+ * Index is published every month on the 15th for the previous month.
+ * - If payment date is before the 15th: use index of two months earlier.
+ * - If payment date is on or after the 15th: use index of previous month.
+ * Returns period as "MM-YYYY" to match Indices board item names.
+ */
+function getIndexPeriodForPaymentDate(paymentDate: string): string {
+  const d = new Date(paymentDate);
+  const year = d.getFullYear();
+  const month = d.getMonth() + 1; // 1-12
+  const day = d.getDate();
+
+  let targetMonth: number;
+  let targetYear: number;
+
+  if (day < 15) {
+    targetMonth = month - 2;
+    targetYear = year;
+  } else {
+    targetMonth = month - 1;
+    targetYear = year;
+  }
+
+  while (targetMonth < 1) {
+    targetMonth += 12;
+    targetYear--;
+  }
+
+  return `${String(targetMonth).padStart(2, '0')}-${targetYear}`;
+}
+
+// ─── Fetch index from Monday Indices board for payment date ──────────────────
+/**
+ * Item name format: "01-2026" (MM-YYYY).
+ * Uses payment date to determine which index applies (published on 15th for previous month).
+ */
+export async function fetchIndexForPaymentDate(
+  paymentDate: string
+): Promise<{ value: number; period: string } | null> {
+  const targetPeriod = getIndexPeriodForPaymentDate(paymentDate);
   const col = INDEX_BOARD.columns.indexValue;
   const allItems: Array<{ name: string; column_values: Array<{ id: string; value: string }> }> = [];
   let cursor: string | null = null;
@@ -427,18 +465,18 @@ export async function fetchLatestIndexFromMonday(): Promise<{ value: number; per
           value = parseFloat(cv.value) || 0;
         }
       }
-      return { period, value, sortKey: `${yyyy}-${mm}` };
+      return { period, value };
     })
     .filter((x): x is NonNullable<typeof x> => x != null && x.value > 0);
 
-  if (withPeriod.length === 0) {
-    logger.warn('No valid index items found in Indices board');
+  const match = withPeriod.find((x) => x.period === targetPeriod);
+  if (!match) {
+    logger.warn('No index found for payment date', { paymentDate, targetPeriod, availablePeriods: withPeriod.map((x) => x.period) });
     return null;
   }
 
-  const latest = withPeriod.sort((a, b) => b.sortKey.localeCompare(a.sortKey))[0];
-  logger.info('Latest index from Monday', { period: latest.period, value: latest.value });
-  return { value: latest.value, period: latest.period };
+  logger.info('Index for payment date', { paymentDate, targetPeriod, value: match.value });
+  return { value: match.value, period: match.period };
 }
 
 // ─── Fetch contract details (interest rate, base index) ──────────────────────
@@ -915,7 +953,7 @@ export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPayme
 
   const [contractDetails, indexResult] = await Promise.all([
     fetchContractDetails(contractId),
-    fetchLatestIndexFromMonday(),
+    fetchIndexForPaymentDate(paymentDate),
   ]);
 
   const currentIndex = indexResult?.value ?? 100;
