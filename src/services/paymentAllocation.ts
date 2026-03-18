@@ -541,12 +541,13 @@ export interface ContractDetails {
 export async function fetchContractDetails(contractId: number): Promise<ContractDetails | null> {
   const irCol = CONTRACTS_BOARD.columns.interestRatePercent;
   const biCol = CONTRACTS_BOARD.columns.baseIndex;
+  const bidCol = CONTRACTS_BOARD.columns.baseIndexDate;
 
   const query = `
     query GetContract($itemId: ID!) {
       items(ids: [$itemId]) {
         id
-        column_values(ids: ["${irCol}", "${biCol}"]) {
+        column_values(ids: ["${irCol}", "${biCol}", "${bidCol}"]) {
           id
           value
         }
@@ -566,17 +567,48 @@ export async function fetchContractDetails(contractId: number): Promise<Contract
 
   let interestRatePercent = 0;
   let baseIndex = 100;
+  let baseIndexDateIso: string | null = null;
 
   for (const cv of item.column_values) {
     try {
       const parsed = JSON.parse(cv.value || '{}');
-      const val = parseFloat(parsed.value ?? parsed) || 0;
-      if (cv.id === irCol) interestRatePercent = val;
-      else if (cv.id === biCol) baseIndex = val > 0 ? val : 100;
+      if (cv.id === irCol) {
+        const val = parseFloat(parsed.value ?? parsed) || 0;
+        interestRatePercent = val;
+      } else if (cv.id === biCol) {
+        const val = parseFloat(parsed.value ?? parsed) || 0;
+        baseIndex = val > 0 ? val : 100;
+      } else if (cv.id === bidCol && parsed.date) {
+        baseIndexDateIso = String(parsed.date).slice(0, 10);
+      }
     } catch {
-      const val = parseFloat(cv.value ?? '') || 0;
-      if (cv.id === irCol) interestRatePercent = val;
-      else if (cv.id === biCol) baseIndex = val > 0 ? val : 100;
+      if (cv.id === irCol) {
+        const val = parseFloat(cv.value ?? '') || 0;
+        interestRatePercent = val;
+      } else if (cv.id === biCol) {
+        const val = parseFloat(cv.value ?? '') || 0;
+        baseIndex = val > 0 ? val : 100;
+      }
+    }
+  }
+
+  // If baseIndexDate is set, fetch base index from Indices board (5092654858) using same before/after 15th rules
+  if (baseIndexDateIso) {
+    const indexResult = await fetchIndexForPaymentDate(baseIndexDateIso);
+    if (indexResult) {
+      baseIndex = indexResult.value;
+      logger.info('Base index from Indices board by date', {
+        contractId,
+        baseIndexDate: baseIndexDateIso,
+        baseIndex,
+        period: indexResult.period,
+      });
+    } else {
+      logger.warn('Could not fetch base index from Indices board for date, using fallback', {
+        contractId,
+        baseIndexDate: baseIndexDateIso,
+        fallbackBaseIndex: baseIndex,
+      });
     }
   }
 
@@ -585,6 +617,7 @@ export async function fetchContractDetails(contractId: number): Promise<Contract
     interestRateColumn: irCol,
     interestRatePercent,
     baseIndex,
+    baseIndexSource: baseIndexDateIso ? `Indices board 5092654858 (date ${baseIndexDateIso})` : 'Contracts board numeric column',
     rawColumnValues: item.column_values.map((cv) => ({ id: cv.id, value: cv.value })),
   });
   return { interestRatePercent, baseIndex };

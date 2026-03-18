@@ -32,6 +32,8 @@ export const CONTRACTS_BOARD = {
   columns: {
     interestRatePercent: "numeric_mm1fn125",
     baseIndex: "numeric_mm1f17hf",
+    /** Date used to fetch base index from Indices board (before/after 15th rules). Overrides baseIndex when set. */
+    baseIndexDate: "date_mm1js4d4",
   } as const,
 } as const;
 
