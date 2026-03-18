@@ -34,6 +34,8 @@ export interface ContractualPaymentItem {
   indexationPaymentDue: number;
   principal: number;
   contractualDueDate: string | null;
+  /** "V" = index-linked, "X" = not index-linked (indexation always 0). Default "V" when unset. */
+  indexLinkedStatus: "V" | "X";
 }
 
 export interface RemainingBalances {
@@ -105,8 +107,6 @@ function parseBoardRelationIds(value: string | null | undefined): number[] {
 export async function fetchActualPaymentItem(
   itemId: string
 ): Promise<ActualPaymentItem | null> {
-  logger.info('Fetching actual payment item', { itemId });
-
   const query = `
     query GetActualPayment($itemId: ID!) {
       items(ids: [$itemId]) {
@@ -174,17 +174,12 @@ export async function fetchActualPaymentItem(
   // Fallback: if board relation is empty but contractId text column has a value, use it
   if (linkedContractIds.length === 0 && contractIdText?.trim()) {
     const parsed = parseInt(contractIdText.trim(), 10);
-    if (!isNaN(parsed)) {
-      linkedContractIds = [parsed];
-      logger.info('Using contractId text column as fallback', { contractIdText, linkedContractIds });
-    }
+    if (!isNaN(parsed)) linkedContractIds = [parsed];
   }
 
   if (!receiptAmount || receiptAmount <= 0) {
     logger.warn('Actual payment item has no valid receipt amount', { itemId, receiptAmount });
   }
-
-  logger.info('Fetched actual payment', { itemId, receiptAmount, receiptDate, linkedContractIds });
 
   return {
     id: item.id,
@@ -211,9 +206,7 @@ export function extractContractId(actualPayment: ActualPaymentItem): number | nu
 export async function findMatchingContractualItems(
   contractId: number
 ): Promise<ContractualPaymentItem[]> {
-  logger.info('Finding contractual payment items for contract', { contractId });
-
-  type ContractualColumnValue = { id: string; value?: string | null; linked_item_ids?: string[] };
+  type ContractualColumnValue = { id: string; value?: string | null; text?: string | null; label?: string | null; linked_item_ids?: string[] };
   const allItems: Array<{ id: string; name: string; column_values: ContractualColumnValue[] }> = [];
   let cursor: string | null = null;
 
@@ -223,6 +216,7 @@ export async function findMatchingContractualItems(
     CONTRACTUAL_PAYMENTS.items.principalDue,
     CONTRACTUAL_PAYMENTS.items.indexationPaymentDue,
     CONTRACTUAL_PAYMENTS.items.contractualDueDate,
+    CONTRACTUAL_PAYMENTS.items.indexLinkedStatus,
   ].join('", "');
 
   do {
@@ -237,8 +231,12 @@ export async function findMatchingContractualItems(
                 column_values(ids: ["${columnIds}"]) {
                 id
                 value
+                text
                 ... on BoardRelationValue {
                   linked_item_ids
+                }
+                ... on StatusValue {
+                  label
                 }
               }
             }
@@ -256,8 +254,12 @@ export async function findMatchingContractualItems(
                 column_values(ids: ["${columnIds}"]) {
                 id
                 value
+                text
                 ... on BoardRelationValue {
                   linked_item_ids
+                }
+                ... on StatusValue {
+                  label
                 }
               }
             }
@@ -319,12 +321,17 @@ export async function findMatchingContractualItems(
     let principalDue = 0;
     let indexationPaymentDue = 0;
     let contractualDueDate: string | null = null;
+    let indexLinkedStatus: "V" | "X" = "V";
 
     for (const cv of item.column_values) {
       try {
         const parsed = JSON.parse(cv.value || '{}');
         if (cv.id === CONTRACTUAL_PAYMENTS.items.contractualDueDate) {
           contractualDueDate = parsed.date ?? null;
+        } else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexLinkedStatus) {
+          const labelRaw = (cv as ContractualColumnValue).label ?? (cv as ContractualColumnValue).text ?? parsed.label ?? parsed.additional_info?.label;
+          const label = (labelRaw ?? "").toString().trim().toUpperCase();
+          indexLinkedStatus = label === "X" ? "X" : "V";
         } else {
           const val = parseFloat(parsed.value ?? parsed) || 0;
           if (cv.id === CONTRACTUAL_PAYMENTS.items.paymentDue) paymentDue = val;
@@ -334,6 +341,10 @@ export async function findMatchingContractualItems(
       } catch {
         if (cv.id === CONTRACTUAL_PAYMENTS.items.contractualDueDate) {
           contractualDueDate = cv.value ?? null;
+        } else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexLinkedStatus) {
+          const labelRaw = (cv as ContractualColumnValue).label ?? (cv as ContractualColumnValue).text ?? cv.value;
+          const label = (labelRaw ?? "").toString().trim().toUpperCase();
+          indexLinkedStatus = label === "X" ? "X" : "V";
         } else {
           const val = parseFloat(cv.value ?? '') || 0;
           if (cv.id === CONTRACTUAL_PAYMENTS.items.paymentDue) paymentDue = val;
@@ -355,17 +366,12 @@ export async function findMatchingContractualItems(
       indexationPaymentDue,
       principal,
       contractualDueDate,
+      indexLinkedStatus,
     };
   });
 
   // Sort by payment order (1, 2, 3, 4...) so we fill the first payment before moving to the next
   contractual.sort((a, b) => a.paymentOrder - b.paymentOrder);
-
-  logger.info('Found contractual items (by payment order)', {
-    contractId,
-    count: contractual.length,
-    order: contractual.map((c) => `${c.paymentOrder}:${c.name}`),
-  });
 
   return contractual;
 }
@@ -385,7 +391,6 @@ function getIndexPeriodForPaymentDate(paymentDate: string): string {
 
   let targetMonth: number;
   let targetYear: number;
-  const rule = day < 15 ? 'before_15th_use_2_months_earlier' : 'on_or_after_15th_use_previous_month';
 
   if (day < 15) {
     targetMonth = month - 2;
@@ -400,23 +405,7 @@ function getIndexPeriodForPaymentDate(paymentDate: string): string {
     targetYear--;
   }
 
-  const targetPeriod = `${String(targetMonth).padStart(2, '0')}-${targetYear}`;
-
-  logger.info('Index period for payment date', {
-    rule: 'Index published on 15th for previous month',
-    paymentDate,
-    paymentDay: day,
-    paymentMonth: month,
-    paymentYear: year,
-    appliedRule: rule,
-    targetPeriod,
-    explanation:
-      day < 15
-        ? `Payment before 15th → use index of 2 months earlier (${month}-${year} → ${targetPeriod})`
-        : `Payment on/after 15th → use index of previous month (${month}-${year} → ${targetPeriod})`,
-  });
-
-  return targetPeriod;
+  return `${String(targetMonth).padStart(2, '0')}-${targetYear}`;
 }
 
 /** Convert "MM-YYYY" to "YYYY-MM" for chronological comparison */
@@ -506,14 +495,6 @@ export async function fetchIndexForPaymentDate(
       .filter((x) => getPeriodSortKey(x.period) <= targetKey)
       .sort((a, b) => getPeriodSortKey(b.period).localeCompare(getPeriodSortKey(a.period)));
     match = availableForTarget[0];
-    if (match) {
-      logger.info('Index fallback: target period not yet published, using most recent available', {
-        paymentDate,
-        targetPeriod,
-        usedPeriod: match.period,
-        availablePeriods: withPeriod.map((x) => x.period),
-      });
-    }
   }
 
   if (!match) {
@@ -521,13 +502,6 @@ export async function fetchIndexForPaymentDate(
     return null;
   }
 
-  logger.info('Index fetched for payment date', {
-    paymentDate,
-    targetPeriod,
-    usedPeriod: match.period,
-    currentIndex: match.value,
-    source: `Indices board 5092654858, item "${match.period}"`,
-  });
   return { value: match.value, period: match.period };
 }
 
@@ -536,6 +510,10 @@ export async function fetchIndexForPaymentDate(
 export interface ContractDetails {
   interestRatePercent: number;
   baseIndex: number;
+  /** Date used for base index (from contract). Null when using numeric column. */
+  baseIndexDate: string | null;
+  /** Index period (MM-YYYY) from Indices board. Null when using numeric column. */
+  baseIndexPeriod: string | null;
 }
 
 export async function fetchContractDetails(contractId: number): Promise<ContractDetails | null> {
@@ -592,17 +570,12 @@ export async function fetchContractDetails(contractId: number): Promise<Contract
     }
   }
 
-  // If baseIndexDate is set, fetch base index from Indices board (5092654858) using same before/after 15th rules
+  let baseIndexPeriod: string | null = null;
   if (baseIndexDateIso) {
     const indexResult = await fetchIndexForPaymentDate(baseIndexDateIso);
     if (indexResult) {
       baseIndex = indexResult.value;
-      logger.info('Base index from Indices board by date', {
-        contractId,
-        baseIndexDate: baseIndexDateIso,
-        baseIndex,
-        period: indexResult.period,
-      });
+      baseIndexPeriod = indexResult.period;
     } else {
       logger.warn('Could not fetch base index from Indices board for date, using fallback', {
         contractId,
@@ -612,15 +585,7 @@ export async function fetchContractDetails(contractId: number): Promise<Contract
     }
   }
 
-  logger.info('Contract details', {
-    contractId,
-    interestRateColumn: irCol,
-    interestRatePercent,
-    baseIndex,
-    baseIndexSource: baseIndexDateIso ? `Indices board 5092654858 (date ${baseIndexDateIso})` : 'Contracts board numeric column',
-    rawColumnValues: item.column_values.map((cv) => ({ id: cv.id, value: cv.value })),
-  });
-  return { interestRatePercent, baseIndex };
+  return { interestRatePercent, baseIndex, baseIndexDate: baseIndexDateIso, baseIndexPeriod };
 }
 
 // ─── Get previous subitem (the one before the next we create) ────────────────
@@ -723,54 +688,22 @@ function computeLateInterest(
   contractualDueDate: string | null,
   paymentDate: string
 ): number {
-  if (!contractualDueDate || remainingPrincipal <= 0) {
-    logger.info('Interest calculation skipped', {
-      reason: !contractualDueDate ? 'no contractual due date' : 'remaining principal <= 0',
-      remainingPrincipal,
-      contractualDueDate,
-    });
-    return 0;
-  }
+  if (!contractualDueDate || remainingPrincipal <= 0) return 0;
 
   const due = new Date(contractualDueDate);
   const paid = new Date(paymentDate);
   const diffMs = paid.getTime() - due.getTime();
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
-  if (diffDays <= GRACE_DAYS) {
-    logger.info('Interest calculation: within grace period, no interest charged', {
-      formula: 'Interest = Remaining_Principal × (r / 365) × Late_Days',
-      values: {
-        remainingPrincipal,
-        interestRatePercent: `${interestRatePercent}%`,
-        r: interestRatePercent / 100,
-        contractualDueDate,
-        paymentDate,
-        diffDays,
-        gracePeriodDays: GRACE_DAYS,
-      },
-      result: 0,
-    });
-    return 0;
-  }
+  if (diffDays <= GRACE_DAYS) return 0;
 
   const r = interestRatePercent / 100;
   const interest = remainingPrincipal * (r / 365) * diffDays;
   const result = round(interest);
 
-  logger.info('Interest calculation', {
-    formula: 'Interest = Remaining_Principal × (r / 365) × Late_Days',
-    values: {
-      remainingPrincipal,
-      interestRatePercent: `${interestRatePercent}%`,
-      r,
-      contractualDueDate,
-      paymentDate,
-      diffDays,
-      gracePeriodDays: GRACE_DAYS,
-    },
+  logger.info('Interest', {
+    formula: 'Remaining_Principal × (r / 365) × Late_Days',
     calculation: `${remainingPrincipal} × (${r} / 365) × ${diffDays} = ${result}`,
-    result,
   });
 
   return result;
@@ -783,37 +716,17 @@ function computeIndexationBalance(
   currentIndex: number,
   previousIndex: number
 ): number {
-  if (remainingPrincipal <= 0 || previousIndex <= 0) {
-    logger.info('Indexation calculation skipped', {
-      reason: remainingPrincipal <= 0 ? 'remaining principal <= 0' : 'previous index <= 0',
-      remainingPrincipal,
-      previousIndex,
-    });
-    return 0;
-  }
+  if (remainingPrincipal <= 0 || previousIndex <= 0) return 0;
+
   const ratio = currentIndex / previousIndex;
   const indexation = remainingPrincipal * (ratio - 1);
   let result = round(indexation);
 
-  if (result < 0) {
-    logger.info('Indexation capped at 0 (Current_Index < Previous_Index)', {
-      rawIndexation: result,
-      currentIndex,
-      previousIndex,
-    });
-    result = 0;
-  }
+  if (result < 0) result = 0;
 
-  logger.info('Indexation calculation', {
-    formula: 'Indexation = Remaining_Principal × (Current_Index / Previous_Index - 1), min 0',
-    values: {
-      remainingPrincipal,
-      currentIndex,
-      previousIndex,
-      ratio: `${currentIndex} / ${previousIndex} = ${ratio.toFixed(4)}`,
-    },
+  logger.info('Indexation', {
+    ratio: `${currentIndex} / ${previousIndex} = ${ratio.toFixed(4)}`,
     calculation: `${remainingPrincipal} × (${ratio.toFixed(4)} - 1) = ${remainingPrincipal} × ${(ratio - 1).toFixed(4)} = ${result}`,
-    result,
   });
 
   return result;
@@ -826,7 +739,8 @@ export async function computeBalancesBeforePayment(
   contractualItem: ContractualPaymentItem,
   paymentDate: string,
   contractDetails: ContractDetails | null,
-  currentIndex: number
+  currentIndex: number,
+  currentIndexPeriod: string
 ): Promise<{ balances: BalancesBeforePayment; remaining: RemainingBalances }> {
   const previous = await getPreviousSubitemBalances(parentItemId, contractualItem.principal);
 
@@ -835,12 +749,15 @@ export async function computeBalancesBeforePayment(
   const contractBaseIndex = contractDetails?.baseIndex ?? 100;
 
   let previousIndex: number;
+  let baseIndexPeriod: string | null = null;
   if (!previous.previousSubitemPaymentDate) {
     previousIndex = contractBaseIndex;
+    baseIndexPeriod = contractDetails?.baseIndexPeriod ?? null;
   } else {
     const prevDateIso = parseSubitemNameToIsoDate(previous.previousSubitemPaymentDate);
     const prevIndexResult = prevDateIso ? await fetchIndexForPaymentDate(prevDateIso) : null;
     previousIndex = prevIndexResult?.value ?? contractBaseIndex;
+    baseIndexPeriod = prevIndexResult?.period ?? null;
     if (!prevIndexResult && prevDateIso) {
       logger.warn('Could not fetch index for previous subitem date, falling back to contract base index', {
         previousSubitemPaymentDate: previous.previousSubitemPaymentDate,
@@ -857,23 +774,32 @@ export async function computeBalancesBeforePayment(
   );
   const remainingInterestBefore = round(calculatedInterest + previous.remainingInterest);
 
-  logger.info('Indexation inputs', {
-    formula: 'Indexation = Remaining_Principal × (Current_Index / Previous_Index - 1)',
-    remainingPrincipal: remainingPrincipalBefore,
-    currentIndex,
-    previousIndex,
-    previousIndexSource: previous.previousSubitemPaymentDate
-      ? `Index from previous subitem payment date (${previous.previousSubitemPaymentDate})`
-      : 'Contracts board base index (first subitem)',
-    previousRemainingIndexation: previous.remainingIndexation,
-  });
+  let calculatedIndexation = 0;
+  let remainingIndexationBefore = 0;
 
-  const calculatedIndexation = computeIndexationBalance(
-    remainingPrincipalBefore,
-    currentIndex,
-    previousIndex
-  );
-  const remainingIndexationBefore = round(calculatedIndexation + previous.remainingIndexation);
+  const baseIndexDate = previous.previousSubitemPaymentDate
+    ? previous.previousSubitemPaymentDate
+    : contractDetails?.baseIndexDate ?? 'numeric column';
+
+  if (contractualItem.indexLinkedStatus !== "X") {
+    logger.info('Payment', {
+      paymentDate,
+      currentIndexPeriod,
+      baseIndexDate,
+      baseIndexPeriod: baseIndexPeriod ?? 'numeric column',
+    });
+  }
+
+  if (contractualItem.indexLinkedStatus === "X") {
+    // indexation skipped
+  } else {
+    calculatedIndexation = computeIndexationBalance(
+      remainingPrincipalBefore,
+      currentIndex,
+      previousIndex
+    );
+    remainingIndexationBefore = round(calculatedIndexation + previous.remainingIndexation);
+  }
 
   const balances: BalancesBeforePayment = {
     remainingPrincipalBefore,
@@ -887,34 +813,6 @@ export async function computeBalancesBeforePayment(
     indexation: remainingIndexationBefore,
   };
 
-  logger.info('Balances before payment (combined)', {
-    parentItemId,
-    paymentDate,
-    fromPreviousSubitem: {
-      remainingPrincipal: previous.remainingPrincipal,
-      remainingInterest: previous.remainingInterest,
-      remainingIndexation: previous.remainingIndexation,
-    },
-    interestFormula: 'Remaining_Interest_Before = calculated_interest + previous_remaining_interest',
-    interestValues: {
-      calculatedInterest,
-      previousRemainingInterest: previous.remainingInterest,
-      remainingInterestBefore,
-    },
-    indexationFormula: 'Remaining_Indexation_Before = calculated_indexation + previous_remaining_indexation',
-    indexationValues: {
-      calculatedIndexation,
-      previousRemainingIndexation: previous.remainingIndexation,
-      remainingIndexationBefore,
-    },
-    totals: {
-      remainingPrincipalBefore,
-      remainingInterestBefore,
-      remainingIndexationBefore,
-      totalOwed: round(remainingPrincipalBefore + remainingInterestBefore + remainingIndexationBefore),
-    },
-  });
-
   return { balances, remaining };
 }
 
@@ -926,8 +824,6 @@ export function allocatePayment(
 ): AllocationResult {
   let remaining = round(amount);
   const { principal, interest, indexation } = initialBalances;
-
-  const allocationOrder = '1. Interest → 2. Indexation → 3. Principal';
 
   let interestPaid = round(Math.min(remaining, interest));
   const afterInterest = round(remaining - interestPaid);
@@ -942,43 +838,6 @@ export function allocatePayment(
   remaining = afterPrincipal;
 
   const amountUsed = round(interestPaid + indexationPaid + principalPaid);
-
-  logger.info('Payment allocation', {
-    formula: allocationOrder,
-    input: {
-      paymentAmount: amount,
-      balancesOwed: { interest, indexation, principal },
-    },
-    step1_interest: {
-      remainingBefore: amount,
-      interestOwed: interest,
-      interestPaid,
-      remainingAfter: afterInterest,
-    },
-    step2_indexation: {
-      remainingBefore: afterInterest,
-      indexationOwed: indexation,
-      indexationPaid,
-      remainingAfter: afterIndexation,
-    },
-    step3_principal: {
-      remainingBefore: afterIndexation,
-      principalOwed: principal,
-      principalPaid,
-      remainingAfter: afterPrincipal,
-    },
-    result: {
-      indexationPaid,
-      interestPaid,
-      principalPaid,
-      amountUsed,
-      remainingBalances: {
-        indexation: round(indexation - indexationPaid),
-        interest: round(interest - interestPaid),
-        principal: round(principal - principalPaid),
-      },
-    },
-  });
 
   return {
     principalPaid,
@@ -1066,8 +925,6 @@ export interface ApplyPaymentResult {
 
 export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPaymentResult> {
   const { actualPaymentItemId } = input;
-  logger.info('Applying payment', { actualPaymentItemId });
-
   const actualPayment = await fetchActualPaymentItem(actualPaymentItemId);
   if (!actualPayment) {
     return { success: false, subitemsCreated: 0, error: 'Actual payment item not found' };
@@ -1112,15 +969,13 @@ export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPayme
       item,
       paymentDate,
       contractDetails,
-      currentIndex
+      currentIndex,
+      indexResult?.period ?? 'N/A'
     );
 
     const totalRemaining = round(remaining.principal + remaining.interest + remaining.indexation);
 
-    if (totalRemaining <= 0) {
-      logger.info('Contractual item fully paid, skipping', { itemId: item.id });
-      continue;
-    }
+    if (totalRemaining <= 0) continue;
 
     const allocation = allocatePayment(remainingToAllocate, remaining);
     if (allocation.amountUsed <= 0) break;
@@ -1134,13 +989,12 @@ export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPayme
 
     await createSubitem(item.id, payload);
     subitemsCreated++;
-    remainingToAllocate = round(remainingToAllocate - allocation.amountUsed);
 
-    logger.info('Allocated to contractual item', {
-      itemId: item.id,
-      amountUsed: allocation.amountUsed,
-      remainingToAllocate,
-    });
+    if (item.indexLinkedStatus === "X" && allocation.interestPaid === 0 && allocation.indexationPaid === 0) {
+      logger.info('Payment applied (no interest, no indexation)', { itemId: actualPaymentItemId, paymentDate });
+    }
+
+    remainingToAllocate = round(remainingToAllocate - allocation.amountUsed);
   }
 
   if (remainingToAllocate > 0) {
@@ -1150,6 +1004,5 @@ export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPayme
     });
   }
 
-  logger.info('Payment application complete', { actualPaymentItemId, subitemsCreated });
   return { success: true, subitemsCreated };
 }

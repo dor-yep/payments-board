@@ -9,6 +9,8 @@ export const CONTRACTUAL_PAYMENTS = {
     contractLink: "board_relation_mm0tcdy3",
     /** Contractual due date for interest calculation */
     contractualDueDate: "date_mm0t3zcj",
+    /** Index-linked status: "V" = index-linked, "X" = not index-linked (indexation always 0) */
+    indexLinkedStatus: "color_mm11deyr",
   } as const,
   subitems: {
     boardId: "5092168551",
