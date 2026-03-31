@@ -59,6 +59,10 @@ export interface BalancesBeforePayment {
   remainingPrincipalBefore: number;
   remainingInterestBefore: number;
   remainingIndexationBefore: number;
+  /** Days used as late-day multiplier in interest (0 if within grace or no due date). */
+  interestLateDays: number;
+  /** (Current index / previous index − 1) × 100; 0 if not index-linked. */
+  indexChangePercent: number;
 }
 
 export interface SubitemPayload {
@@ -685,9 +689,9 @@ function parseSubitemNameToIsoDate(name: string | null): string | null {
 // ─── Compute interest (7-day grace) ───────────────────────────────────────────
 const GRACE_DAYS = 7;
 
-function computeLateInterest(
+/** Calendar days from due date used in the interest formula (after grace); never negative. */
+function computeInterestLateDays(
   remainingPrincipal: number,
-  interestRatePercent: number,
   contractualDueDate: string | null,
   paymentDate: string
 ): number {
@@ -699,6 +703,22 @@ function computeLateInterest(
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
   if (diffDays <= GRACE_DAYS) return 0;
+
+  return diffDays;
+}
+
+function computeLateInterest(
+  remainingPrincipal: number,
+  interestRatePercent: number,
+  contractualDueDate: string | null,
+  paymentDate: string,
+  lateDaysOverride?: number
+): number {
+  const diffDays =
+    lateDaysOverride !== undefined
+      ? lateDaysOverride
+      : computeInterestLateDays(remainingPrincipal, contractualDueDate, paymentDate);
+  if (diffDays <= 0) return 0;
 
   const r = interestRatePercent / 100;
   const interest = remainingPrincipal * (r / 365) * diffDays;
@@ -769,16 +789,24 @@ export async function computeBalancesBeforePayment(
     }
   }
 
+  const interestLateDays = computeInterestLateDays(
+    remainingPrincipalBefore,
+    contractualItem.contractualDueDate,
+    paymentDate
+  );
+
   const calculatedInterest = computeLateInterest(
     remainingPrincipalBefore,
     interestRatePercent,
     contractualItem.contractualDueDate,
-    paymentDate
+    paymentDate,
+    interestLateDays
   );
   const remainingInterestBefore = round(calculatedInterest + previous.remainingInterest);
 
   let calculatedIndexation = 0;
   let remainingIndexationBefore = 0;
+  let indexChangePercent = 0;
 
   const baseIndexDate = previous.previousSubitemPaymentDate
     ? previous.previousSubitemPaymentDate
@@ -802,12 +830,17 @@ export async function computeBalancesBeforePayment(
       previousIndex
     );
     remainingIndexationBefore = round(calculatedIndexation + previous.remainingIndexation);
+    if (previousIndex > 0) {
+      indexChangePercent = round((currentIndex / previousIndex - 1) * 100);
+    }
   }
 
   const balances: BalancesBeforePayment = {
     remainingPrincipalBefore,
     remainingInterestBefore,
     remainingIndexationBefore,
+    interestLateDays,
+    indexChangePercent,
   };
 
   const remaining: RemainingBalances = {
@@ -860,22 +893,35 @@ export function createSubitemPayload(
   allocation: AllocationResult,
   actualAmountAllocated: number,
   balancesBefore: BalancesBeforePayment,
-  actualPaymentName: string
+  actualPaymentName: string,
+  actualPaymentItemId: string,
+  /** Same as actual payment board receipt (numeric_mm0tyhpc); repeated on each subitem when split */
+  originalActualReceiptTotal: number,
+  isPartOfSplitPayment: boolean
 ): SubitemPayload {
   const sub = CONTRACTUAL_PAYMENTS.subitems;
-  // Monday API expects numeric columns as plain strings: "column_id": "123"
-  const columnValues: Record<string, string> = {
+  // Monday API: numerics/text as plain strings; status/color needs a JSON object in the outer column_values (same pattern as date columns in indexBoard).
+  const columnValues: Record<string, unknown> = {
     [sub.actualPaymentName]: actualPaymentName || '',
+    [sub.actualPaymentItemId]: actualPaymentItemId || '',
+    [sub.originalActualReceiptTotal]: String(round(originalActualReceiptTotal)),
     [sub.actualReceipt]: String(actualAmountAllocated),
     [sub.remainingPrincipalBeforePayment]: String(balancesBefore.remainingPrincipalBefore),
     [sub.remainingInterestBeforePayment]: String(balancesBefore.remainingInterestBefore),
     [sub.remainingIndexationBeforePayment]: String(balancesBefore.remainingIndexationBefore),
     [sub.interest]: String(allocation.interestPaid),
     [sub.indexLinkage]: String(allocation.indexationPaid),
+    [sub.principalPayment]: String(allocation.principalPaid),
+    [sub.interestLateDays]: String(balancesBefore.interestLateDays),
+    [sub.indexChangePercent]: String(balancesBefore.indexChangePercent),
     [sub.remainingInterest]: String(allocation.remainingInterest),
     [sub.remainingIndexLinkage]: String(allocation.remainingIndexation),
     [sub.remainingPrincipal]: String(allocation.remainingPrincipal),
   };
+  if (isPartOfSplitPayment) {
+    // Status index 1 = "כן" on this column; must be an object, not a stringified blob (create_subitem stringifies column_values once).
+    columnValues[sub.splitPaymentIndicator] = { index: 1 };
+  }
   return {
     name: formatDateForDisplay(paymentDate),
     columnValues,
@@ -964,7 +1010,14 @@ export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPayme
   }
 
   let remainingToAllocate = round(actualPayment.receiptAmount);
-  let subitemsCreated = 0;
+
+  type PendingSubitem = {
+    parentItemId: string;
+    contractualItem: ContractualPaymentItem;
+    allocation: AllocationResult;
+    balances: BalancesBeforePayment;
+  };
+  const pending: PendingSubitem[] = [];
 
   for (const item of contractualItems) {
     if (remainingToAllocate <= 0) break;
@@ -985,22 +1038,41 @@ export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPayme
     const allocation = allocatePayment(remainingToAllocate, remaining);
     if (allocation.amountUsed <= 0) break;
 
-    const payload = createSubitemPayload(
-      paymentDate,
+    pending.push({
+      parentItemId: item.id,
+      contractualItem: item,
       allocation,
-      allocation.amountUsed,
       balances,
-      actualPayment.name
-    );
-
-    await createSubitem(item.id, payload);
-    subitemsCreated++;
-
-    if (item.indexLinkedStatus === "X" && allocation.interestPaid === 0 && allocation.indexationPaid === 0) {
-      logger.info('Payment applied (no interest, no indexation)', { itemId: actualPaymentItemId, paymentDate });
-    }
+    });
 
     remainingToAllocate = round(remainingToAllocate - allocation.amountUsed);
+  }
+
+  const paymentSplitAcrossMultiple = pending.length > 1;
+  let subitemsCreated = 0;
+
+  for (const p of pending) {
+    const payload = createSubitemPayload(
+      paymentDate,
+      p.allocation,
+      p.allocation.amountUsed,
+      p.balances,
+      actualPayment.name,
+      actualPayment.id,
+      actualPayment.receiptAmount,
+      paymentSplitAcrossMultiple
+    );
+
+    await createSubitem(p.parentItemId, payload);
+    subitemsCreated++;
+
+    if (
+      p.contractualItem.indexLinkedStatus === 'X' &&
+      p.allocation.interestPaid === 0 &&
+      p.allocation.indexationPaid === 0
+    ) {
+      logger.info('Payment applied (no interest, no indexation)', { itemId: actualPaymentItemId, paymentDate });
+    }
   }
 
   if (remainingToAllocate > 0) {

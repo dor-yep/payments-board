@@ -16,6 +16,12 @@ export const CONTRACTUAL_PAYMENTS = {
     boardId: "5092168551",
     name: "name",
     actualPaymentName: "text_mm1jy3x7",
+    /** Actual payment item ID (same as Actual Payments board pulse/item id) */
+    actualPaymentItemId: "text_mm1y3p6f",
+    /** When one receipt spans multiple contractual payments, all related subitems get label "כן" */
+    splitPaymentIndicator: "color_mm1y2mwy",
+    /** Full receipt from Actual Payments (numeric_mm0tyhpc); unchanged when the payment is split across subitems */
+    originalActualReceiptTotal: "numeric_mm1z9zy4",
     actualReceipt: "numeric_mm1bp0ht",
     remainingInterestBeforePayment: "numeric_mm1fws8v",
     remainingIndexationBeforePayment: "numeric_mm1f31qx",
@@ -26,6 +32,12 @@ export const CONTRACTUAL_PAYMENTS = {
     remainingInterest: "numeric_mm1cdy74",
     remainingIndexLinkage: "numeric_mm1cf2ws",
     remainingPrincipal: "numeric_mm1cz0x0",
+    /** Amount of principal paid in this payment */
+    principalPayment: "numeric_mm1srrt5",
+    /** Days from contractual due (after grace) used for interest accrual — matches interest formula */
+    interestLateDays: "numeric_mm1snkkb",
+    /** Index change (current / previous − 1) × 100 — previous = contract base or prior payment index */
+    indexChangePercent: "numeric_mm1sy5px",
   } as const,
 } as const;
 
@@ -44,6 +56,8 @@ export const ACTUAL_PAYMENTS = {
   boardId: "5092169396",
   columns: {
     name: "name",
+    /** Item ID on the pulse (mirrors the id used when creating subitem links) */
+    pulseId: "pulse_id_mm1ygfs7",
     receiptAmount: "numeric_mm0tyhpc",
     document: "file_mm0tcpmv",
     receiptType: "dropdown_mm0tv7z7",
