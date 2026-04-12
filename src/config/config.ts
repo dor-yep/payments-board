@@ -7,8 +7,10 @@ export const CONTRACTUAL_PAYMENTS = {
     indexationPaymentDue: "numeric_mm117vgw",
     /** Contract link column - links to the same contract as Actual Payments */
     contractLink: "board_relation_mm0tcdy3",
-    /** Contractual due date for interest calculation */
+    /** Contractual due date (e.g. display / sorting) */
     contractualDueDate: "date_mm0t3zcj",
+    /** When set, replaces contractual due for late-days / interest timing only (vs actual receipt date). */
+    lateDaysDueDate: "date_mm2bakbq",
     /** Index-linked status: "V" = index-linked, "X" = not index-linked (indexation always 0) */
     indexLinkedStatus: "color_mm11deyr",
     /** דירה | רישום זכויות — receipts only clear lines with the same category */

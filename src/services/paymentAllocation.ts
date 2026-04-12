@@ -50,6 +50,8 @@ export interface ContractualPaymentItem {
   indexationPaymentDue: number;
   principal: number;
   contractualDueDate: string | null;
+  /** `date_mm2bakbq` — if set, used instead of contractualDueDate for late-days only. */
+  lateDaysDueDate: string | null;
   /** "V" = index-linked, "X" = not index-linked (indexation always 0). Default "V" when unset. */
   indexLinkedStatus: "V" | "X";
   /** דירה | רישום זכויות — must match actual payment to allocate. */
@@ -311,6 +313,7 @@ export async function findMatchingContractualItems(
     CONTRACTUAL_PAYMENTS.items.principalDue,
     CONTRACTUAL_PAYMENTS.items.indexationPaymentDue,
     CONTRACTUAL_PAYMENTS.items.contractualDueDate,
+    CONTRACTUAL_PAYMENTS.items.lateDaysDueDate,
     CONTRACTUAL_PAYMENTS.items.indexLinkedStatus,
     CONTRACTUAL_PAYMENTS.items.paymentCategory,
   ].join('", "');
@@ -424,6 +427,7 @@ export async function findMatchingContractualItems(
     let principalDue = 0;
     let indexationPaymentDue = 0;
     let contractualDueDate: string | null = null;
+    let lateDaysDueDate: string | null = null;
     let indexLinkedStatus: "V" | "X" = "V";
     let rowPaymentCategory: PaymentCategory = 'דירה';
 
@@ -432,6 +436,8 @@ export async function findMatchingContractualItems(
         const parsed = JSON.parse(cv.value || '{}');
         if (cv.id === CONTRACTUAL_PAYMENTS.items.contractualDueDate) {
           contractualDueDate = parsed.date ?? null;
+        } else if (cv.id === CONTRACTUAL_PAYMENTS.items.lateDaysDueDate) {
+          lateDaysDueDate = parsed.date ? String(parsed.date).slice(0, 10) : null;
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.paymentCategory) {
           rowPaymentCategory = parsePaymentCategoryLabel(cv as ContractualColumnValue);
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexLinkedStatus) {
@@ -447,6 +453,9 @@ export async function findMatchingContractualItems(
       } catch {
         if (cv.id === CONTRACTUAL_PAYMENTS.items.contractualDueDate) {
           contractualDueDate = cv.value ?? null;
+        } else if (cv.id === CONTRACTUAL_PAYMENTS.items.lateDaysDueDate) {
+          lateDaysDueDate =
+            typeof cv.value === 'string' && cv.value.trim() ? String(cv.value).slice(0, 10) : null;
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.paymentCategory) {
           rowPaymentCategory = parsePaymentCategoryLabel(cv as ContractualColumnValue);
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexLinkedStatus) {
@@ -474,6 +483,7 @@ export async function findMatchingContractualItems(
       indexationPaymentDue,
       principal,
       contractualDueDate,
+      lateDaysDueDate,
       indexLinkedStatus,
       paymentCategory: rowPaymentCategory,
     };
@@ -882,7 +892,10 @@ function computeIndexationBalance(
 export async function computeBalancesBeforePayment(
   parentItemId: string,
   contractualItem: ContractualPaymentItem,
+  /** Effective date for index / subitem name (may use index override column on actual payment). */
   paymentDate: string,
+  /** Actual receipt date (`date_mm0tny6b`) for late-days vs contractual due — not the index override. */
+  receiptDateForLateDays: string,
   contractDetails: ContractDetails | null,
   currentIndex: number,
   currentIndexPeriod: string
@@ -935,17 +948,20 @@ export async function computeBalancesBeforePayment(
     }
   }
 
+  const dueForLateDays =
+    contractualItem.lateDaysDueDate?.trim() || contractualItem.contractualDueDate;
+
   const interestLateDays = computeInterestLateDays(
     remainingPrincipalBefore,
-    contractualItem.contractualDueDate,
-    paymentDate
+    dueForLateDays,
+    receiptDateForLateDays
   );
 
   const calculatedInterest = computeLateInterest(
     remainingPrincipalBefore,
     interestRatePercent,
-    contractualItem.contractualDueDate,
-    paymentDate,
+    dueForLateDays,
+    receiptDateForLateDays,
     interestLateDays
   );
   const remainingInterestBefore = round(calculatedInterest + previous.remainingInterest);
@@ -1168,11 +1184,16 @@ export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPayme
     return { success: false, subitemsCreated: 0, error: 'No matching contractual payment items found' };
   }
 
-  /** Effective date for index, interest, and subitem name: optional override column, else receipt date. */
+  /** Effective date for index and subitem name: optional index override, else receipt date. */
   const paymentDate =
     actualPayment.indexPaymentDate?.trim() ||
     actualPayment.receiptDate ||
     new Date().toISOString().slice(0, 10);
+
+  /** Late days: contractual `date_mm2bakbq` or `date_mm0t3zcj` vs actual `date_mm0tny6b` only (not index override). */
+  const receiptDateForLateDays =
+    actualPayment.receiptDate?.trim() ||
+    paymentDate;
 
   const isRegistrationPayment = actualPayment.paymentCategory === 'רישום זכויות';
 
@@ -1203,6 +1224,7 @@ export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPayme
       item.id,
       item,
       paymentDate,
+      receiptDateForLateDays,
       contractDetails,
       currentIndex,
       indexResult?.period ?? 'N/A'
