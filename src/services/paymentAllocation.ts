@@ -63,6 +63,10 @@ export interface BalancesBeforePayment {
   interestLateDays: number;
   /** (Current index / previous index − 1) × 100; 0 if not index-linked. */
   indexChangePercent: number;
+  /** Index for payment date (same as Current_Index in indexation formula). */
+  currentIndexValue: number;
+  /** Previous index in the ratio (contract base or index at prior payment date). */
+  indexationBaseIndex: number;
 }
 
 export interface SubitemPayload {
@@ -841,6 +845,8 @@ export async function computeBalancesBeforePayment(
     remainingIndexationBefore,
     interestLateDays,
     indexChangePercent,
+    currentIndexValue: currentIndex,
+    indexationBaseIndex: previousIndex,
   };
 
   const remaining: RemainingBalances = {
@@ -914,6 +920,8 @@ export function createSubitemPayload(
     [sub.principalPayment]: String(allocation.principalPaid),
     [sub.interestLateDays]: String(balancesBefore.interestLateDays),
     [sub.indexChangePercent]: String(balancesBefore.indexChangePercent),
+    [sub.currentIndexValue]: String(round(balancesBefore.currentIndexValue)),
+    [sub.indexationBaseIndex]: String(round(balancesBefore.indexationBaseIndex)),
     [sub.remainingInterest]: String(allocation.remainingInterest),
     [sub.remainingIndexLinkage]: String(allocation.remainingIndexation),
     [sub.remainingPrincipal]: String(allocation.remainingPrincipal),

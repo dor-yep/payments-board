@@ -38,6 +38,10 @@ export const CONTRACTUAL_PAYMENTS = {
     interestLateDays: "numeric_mm1snkkb",
     /** Index change (current / previous − 1) × 100 — previous = contract base or prior payment index */
     indexChangePercent: "numeric_mm1sy5px",
+    /** מדד עדכני — index value for the payment date (Indices board) */
+    currentIndexValue: "numeric_mm2b6jvk",
+    /** מדד בסיס — index used as denominator in indexation (contract base or prior payment date index) */
+    indexationBaseIndex: "numeric_mm2b58jt",
   } as const,
 } as const;
 

@@ -7,7 +7,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev:server": "tsx watch src/index.ts",
-    "dev:expose": "npx @mondaycom/apps-cli tunnel:create -p 3000 -a 11007042",
+    "dev:expose": "npx @mondaycom/apps-cli tunnel:create -p ${PORT:-3000} -a 11007042",
     "dev": "concurrently -n server,expose -c blue,green \"npm run dev:server\" \"npm run dev:expose\"",
     "deploy": "npm run build && npx @mondaycom/apps-cli code:push -d ./dist -a 11007042",
     "deploy:versions": "npx @mondaycom/apps-cli app-version:list -a 11007042"
