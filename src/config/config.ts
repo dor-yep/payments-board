@@ -11,6 +11,8 @@ export const CONTRACTUAL_PAYMENTS = {
     contractualDueDate: "date_mm0t3zcj",
     /** Index-linked status: "V" = index-linked, "X" = not index-linked (indexation always 0) */
     indexLinkedStatus: "color_mm11deyr",
+    /** דירה | רישום זכויות — receipts only clear lines with the same category */
+    paymentCategory: "color_mm2b2889",
   } as const,
   subitems: {
     boardId: "5092168551",
@@ -42,6 +44,8 @@ export const CONTRACTUAL_PAYMENTS = {
     currentIndexValue: "numeric_mm2b6jvk",
     /** מדד בסיס — index used as denominator in indexation (contract base or prior payment date index) */
     indexationBaseIndex: "numeric_mm2b58jt",
+    /** Same category as source actual payment (דירה | רישום זכויות) */
+    paymentCategory: "color_mm2br0yj",
   } as const,
 } as const;
 
@@ -66,6 +70,8 @@ export const ACTUAL_PAYMENTS = {
     document: "file_mm0tcpmv",
     receiptType: "dropdown_mm0tv7z7",
     receiptDate: "date_mm0tny6b",
+    /** When set, replaces receipt date for index period, interest, and subitem date (allocation treats payment as of this date). */
+    indexPaymentDate: "date_mm2bcmy6",
     notes: "text_mm0tyq8q",
     contracts: "board_relation_mm0t5e32",
     contractId: "text_mm18ghg5",
@@ -73,6 +79,8 @@ export const ACTUAL_PAYMENTS = {
     amountForInterest: "numeric_mm1421wt",
     amountForIndexLinkage: "numeric_mm14ep9e",
     amountForPrincipal: "numeric_mm14bdn5",
+    /** דירה | רישום זכויות — which contractual stream this receipt pays */
+    paymentCategory: "color_mm2b4z50",
   } as const,
 } as const;
 
