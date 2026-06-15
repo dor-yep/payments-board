@@ -9,6 +9,17 @@ type StatusColumnValue = {
   value?: string | null;
 };
 
+type StatusColorInfo = {
+  color?: string;
+  border?: string;
+  var_name?: string;
+};
+
+type StatusColumnSettings = {
+  labels: Record<string, string>;
+  labels_colors: Record<string, StatusColorInfo>;
+};
+
 function toNumericIndex(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim() !== '') {
@@ -28,7 +39,8 @@ function statusIndicatesTrue(labelText: string): boolean {
     normalized === 'כן' ||
     normalized.includes('✅') ||
     normalized.includes('✔') ||
-    normalized.includes('☑')
+    normalized.includes('☑') ||
+    normalized.includes('✓')
   );
 }
 
@@ -41,67 +53,114 @@ function statusIndicatesFalse(labelText: string): boolean {
     normalized === 'NO' ||
     normalized === 'לא' ||
     normalized.includes('❌') ||
-    normalized === '✗' ||
-    normalized === '✕'
+    normalized.includes('✗') ||
+    normalized.includes('✕') ||
+    normalized.includes('✘')
   );
 }
 
-/** Resolve V/X from visible label text (not status index). */
+/** Resolve V/X from visible label text or icon characters (not status index). */
 export function parseVxFromLabel(label: string): VxStatus | null {
-  const trimmed = label.trim();
-  if (!trimmed) return null;
-  if (statusIndicatesFalse(trimmed)) return 'X';
-  if (statusIndicatesTrue(trimmed)) return 'V';
-  const upper = trimmed.toUpperCase();
+  if (!label) return null;
+  if (statusIndicatesFalse(label)) return 'X';
+  if (statusIndicatesTrue(label)) return 'V';
+  const upper = label.trim().toUpperCase();
   if (upper === 'X') return 'X';
   if (upper === 'V') return 'V';
   return null;
 }
 
-const statusColumnLabelCache = new Map<string, Record<string, string>>();
+function inferVxFromColorVar(varName: string | undefined): VxStatus | null {
+  const v = (varName ?? '').toLowerCase();
+  if (!v) return null;
+  if (v.includes('red') || v.includes('stuck') || v.includes('salmon')) return 'X';
+  if (v.includes('green') || v.includes('done') || v.includes('grass')) return 'V';
+  return null;
+}
 
-async function fetchStatusColumnLabelByIndex(
+function inferVxFromStatusColor(colorHex: string | undefined): VxStatus | null {
+  if (!colorHex?.startsWith('#') || colorHex.length < 7) return null;
+  const r = parseInt(colorHex.slice(1, 3), 16);
+  const g = parseInt(colorHex.slice(3, 5), 16);
+  const b = parseInt(colorHex.slice(5, 7), 16);
+  if ([r, g, b].some((n) => Number.isNaN(n))) return null;
+
+  // Monday reds (e.g. stuck / X icon)
+  if (r > 150 && r > g + 25 && r > b + 25) return 'X';
+  // Monday greens (e.g. done / V icon)
+  if (g > 90 && g > r + 15 && g >= b - 10) return 'V';
+  return null;
+}
+
+const statusColumnSettingsCache = new Map<string, StatusColumnSettings>();
+
+async function fetchStatusColumnSettings(
+  boardId: string,
+  columnId: string
+): Promise<StatusColumnSettings> {
+  const cacheKey = `${boardId}:${columnId}`;
+  const cached = statusColumnSettingsCache.get(cacheKey);
+  if (cached) return cached;
+
+  const labelsQuery = `
+    query StatusColumnLabels($boardId: ID!, $columnId: String!) {
+      boards(ids: [$boardId]) {
+        columns(ids: [$columnId]) {
+          settings_str
+        }
+      }
+    }
+  `;
+  const labelsData = await mondayQuery<{
+    boards: Array<{ columns: Array<{ settings_str?: string | null }> }>;
+  }>(labelsQuery, {
+    boardId: parseInt(boardId, 10),
+    columnId,
+  });
+
+  const settings: StatusColumnSettings = { labels: {}, labels_colors: {} };
+  const settingsStr = labelsData.boards?.[0]?.columns?.[0]?.settings_str ?? null;
+  if (settingsStr) {
+    try {
+      const parsed = JSON.parse(settingsStr) as {
+        labels?: Record<string, string>;
+        labels_colors?: Record<string, StatusColorInfo>;
+      };
+      settings.labels = parsed.labels ?? {};
+      settings.labels_colors = parsed.labels_colors ?? {};
+    } catch {
+      // keep empty settings
+    }
+  }
+
+  statusColumnSettingsCache.set(cacheKey, settings);
+  return settings;
+}
+
+async function resolveVxFromStatusIndex(
   boardId: string,
   columnId: string,
   statusIndex: number
-): Promise<string | null> {
-  const cacheKey = `${boardId}:${columnId}`;
-  let labels = statusColumnLabelCache.get(cacheKey);
-  if (!labels) {
-    const labelsQuery = `
-      query StatusColumnLabels($boardId: ID!, $columnId: String!) {
-        boards(ids: [$boardId]) {
-          columns(ids: [$columnId]) {
-            settings_str
-          }
-        }
-      }
-    `;
-    const labelsData = await mondayQuery<{
-      boards: Array<{ columns: Array<{ settings_str?: string | null }> }>;
-    }>(labelsQuery, {
-      boardId: parseInt(boardId, 10),
-      columnId,
-    });
-    const settingsStr = labelsData.boards?.[0]?.columns?.[0]?.settings_str ?? null;
-    labels = {};
-    if (settingsStr) {
-      try {
-        const settings = JSON.parse(settingsStr) as { labels?: Record<string, string> };
-        labels = settings.labels ?? {};
-      } catch {
-        labels = {};
-      }
-    }
-    statusColumnLabelCache.set(cacheKey, labels);
-  }
-  const mapped = labels[String(statusIndex)] ?? null;
-  return typeof mapped === 'string' ? mapped.trim() || null : null;
+): Promise<VxStatus | null> {
+  const settings = await fetchStatusColumnSettings(boardId, columnId);
+  const key = String(statusIndex);
+
+  const fromLabel = parseVxFromLabel(settings.labels[key] ?? '');
+  if (fromLabel) return fromLabel;
+
+  const colorInfo = settings.labels_colors[key];
+  const fromVar = inferVxFromColorVar(colorInfo?.var_name);
+  if (fromVar) return fromVar;
+
+  const fromHex = inferVxFromStatusColor(colorInfo?.color);
+  if (fromHex) return fromHex;
+
+  return null;
 }
 
 /**
- * Resolve contractual V/X status from label text (V, X, icons), not from status index id.
- * Index is only used to look up the configured label string in column settings.
+ * Resolve V/X from label text, icons, or column color — never from index number alone.
+ * Index is only used to look up the label/color configured for that option in column settings.
  */
 export async function resolveVxStatus(
   cv: StatusColumnValue | undefined,
@@ -129,10 +188,20 @@ export async function resolveVxStatus(
   }
 
   if (statusIndex !== null) {
-    const mappedLabel = await fetchStatusColumnLabelByIndex(boardId, columnId, statusIndex);
-    const fromMapped = parseVxFromLabel(mappedLabel ?? '');
-    if (fromMapped) return fromMapped;
+    const fromSettings = await resolveVxFromStatusIndex(boardId, columnId, statusIndex);
+    if (fromSettings) return fromSettings;
   }
 
   return defaultWhenUnset;
+}
+
+/** For boolean flags (e.g. supplier indexation): V/check/green = true, X/cross/red = false. */
+export async function resolveBooleanFromVxStatus(
+  cv: StatusColumnValue | undefined,
+  boardId: string,
+  columnId: string,
+  defaultWhenUnset = false
+): Promise<boolean> {
+  const vx = await resolveVxStatus(cv, boardId, columnId, defaultWhenUnset ? 'V' : 'X');
+  return vx === 'V';
 }
