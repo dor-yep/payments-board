@@ -13,6 +13,8 @@ export const CONTRACTUAL_PAYMENTS = {
     paymentCategory: "color_mm2b2889",
     /** קרן לפני מע"מ — principal balance for allocation (interest/indexation/principal) */
     principalBeforeVat: "numeric_mm2bhrm1",
+    /** Payment completion status: הושלם | חלקי (unchanged when no actual payment applied) */
+    paymentStatus: "color_mm0tdgw4",
   } as const,
   subitems: {
     boardId: "5092168551",

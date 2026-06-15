@@ -1197,6 +1197,47 @@ export async function createSubitem(
   return id;
 }
 
+type ContractualPaymentStatusLabel = 'הושלם' | 'חלקי';
+
+/** After a payment is applied: fully closed when all remaining buckets are 0, else partial. */
+export function contractualPaymentStatusFromAllocation(
+  allocation: AllocationResult
+): ContractualPaymentStatusLabel {
+  const totalRemaining = round(
+    allocation.remainingPrincipal +
+      allocation.remainingInterest +
+      allocation.remainingIndexation
+  );
+  return totalRemaining === 0 ? 'הושלם' : 'חלקי';
+}
+
+async function updateContractualPaymentStatus(
+  itemId: string,
+  statusLabel: ContractualPaymentStatusLabel
+): Promise<void> {
+  const mutation = `
+    mutation UpdateContractualPaymentStatus($itemId: ID!, $boardId: ID!, $columnValues: JSON!) {
+      change_multiple_column_values(
+        item_id: $itemId,
+        board_id: $boardId,
+        column_values: $columnValues
+      ) {
+        id
+      }
+    }
+  `;
+
+  const columnValues = JSON.stringify({
+    [CONTRACTUAL_PAYMENTS.items.paymentStatus]: { label: statusLabel },
+  });
+
+  await mondayQuery(mutation, {
+    itemId: parseInt(itemId, 10),
+    boardId: parseInt(CONTRACTUAL_PAYMENTS.boardId, 10),
+    columnValues,
+  });
+}
+
 // ─── Main orchestration: apply payment from webhook ──────────────────────────
 
 export interface ApplyPaymentInput {
@@ -1313,6 +1354,9 @@ export async function applyPayment(input: ApplyPaymentInput): Promise<ApplyPayme
 
     await createSubitem(p.parentItemId, payload);
     subitemsCreated++;
+
+    const statusLabel = contractualPaymentStatusFromAllocation(p.allocation);
+    await updateContractualPaymentStatus(p.parentItemId, statusLabel);
 
     if (
       (p.contractualItem.paymentCategory === 'רישום זכויות' ||
