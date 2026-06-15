@@ -43,6 +43,108 @@ function statusIndicatesTrue(labelText: string): boolean {
   );
 }
 
+function statusIndicatesFalse(labelText: string): boolean {
+  const normalized = labelText.trim().toUpperCase();
+  if (!normalized) return false;
+  return (
+    normalized === 'X' ||
+    normalized === 'FALSE' ||
+    normalized === 'NO' ||
+    normalized === 'לא' ||
+    normalized.includes('❌') ||
+    normalized === '✗' ||
+    normalized === '✕'
+  );
+}
+
+/** Returns true/false when label is explicit; null when unknown. */
+function parseIndexationFlagLabel(label: string): boolean | null {
+  const trimmed = label.trim();
+  if (!trimmed) return null;
+  if (statusIndicatesFalse(trimmed)) return false;
+  if (statusIndicatesTrue(trimmed)) return true;
+  return null;
+}
+
+const statusColumnLabelCache = new Map<string, Record<string, string>>();
+
+async function fetchStatusColumnLabelByIndex(
+  boardId: string,
+  columnId: string,
+  statusIndex: number
+): Promise<string | null> {
+  const cacheKey = `${boardId}:${columnId}`;
+  let labels = statusColumnLabelCache.get(cacheKey);
+  if (!labels) {
+    const labelsQuery = `
+      query StatusColumnLabels($boardId: ID!, $columnId: String!) {
+        boards(ids: [$boardId]) {
+          columns(ids: [$columnId]) {
+            settings_str
+          }
+        }
+      }
+    `;
+    const labelsData = await mondayQuery<{
+      boards: Array<{ columns: Array<{ settings_str?: string | null }> }>;
+    }>(labelsQuery, {
+      boardId: parseInt(boardId, 10),
+      columnId,
+    });
+    const settingsStr = labelsData.boards?.[0]?.columns?.[0]?.settings_str ?? null;
+    labels = {};
+    if (settingsStr) {
+      try {
+        const settings = JSON.parse(settingsStr) as { labels?: Record<string, string> };
+        labels = settings.labels ?? {};
+      } catch {
+        labels = {};
+      }
+    }
+    statusColumnLabelCache.set(cacheKey, labels);
+  }
+  const mapped = labels[String(statusIndex)] ?? null;
+  return typeof mapped === 'string' ? mapped.trim() || null : null;
+}
+
+async function resolveShouldApplyIndexation(cv: {
+  label?: string | null;
+  text?: string | null;
+  index?: number | null;
+  value?: string | null;
+}): Promise<boolean> {
+  const labelOrText = (cv.label ?? cv.text ?? '').toString();
+  const fromLabel = parseIndexationFlagLabel(labelOrText);
+  if (fromLabel !== null) return fromLabel;
+
+  let innerIndex = toNumericIndex(cv.index);
+  try {
+    const parsed = JSON.parse(cv.value || '{}');
+    const innerLabel = (parsed.label ?? parsed.text ?? '').toString();
+    const fromInnerLabel = parseIndexationFlagLabel(innerLabel);
+    if (fromInnerLabel !== null) return fromInnerLabel;
+
+    innerIndex =
+      innerIndex ??
+      toNumericIndex(parsed.index) ??
+      toNumericIndex(parsed?.additional_info?.index);
+  } catch {
+    // ignore
+  }
+
+  if (innerIndex !== null) {
+    const mappedLabel = await fetchStatusColumnLabelByIndex(
+      SUPPLIER_PAYMENTS_BOARD_ID,
+      SUPPLIER_COL.indexedFlag,
+      innerIndex
+    );
+    const fromMapped = parseIndexationFlagLabel(mappedLabel ?? '');
+    if (fromMapped !== null) return fromMapped;
+  }
+
+  return false;
+}
+
 function parseBoardRelationIds(value: string | null | undefined): number[] {
   if (!value?.trim()) return [];
   try {
@@ -355,32 +457,16 @@ async function fetchSupplierWebhookItem(itemId: string): Promise<SupplierWebhook
         paymentDate = typeof cv.value === 'string' && cv.value.trim() ? cv.value.slice(0, 10) : null;
       }
     } else if (cv.id === SUPPLIER_COL.indexedFlag) {
-      const labelOrText = (cv.label ?? cv.text ?? '').toString();
-      const statusIndex = toNumericIndex(cv.index);
-      shouldApplyIndexation = statusIndicatesTrue(labelOrText);
-
       logger.info('Supplier indexation status raw', {
         label: cv.label ?? null,
         text: cv.text ?? null,
         index: cv.index ?? null,
         value: cv.value ?? null,
       });
-
-      if (!shouldApplyIndexation) {
-        try {
-          const parsed = JSON.parse(cv.value || '{}');
-          const innerLabel = (parsed.label ?? parsed.text ?? '').toString();
-          const innerIndex =
-            toNumericIndex(parsed.index) ??
-            toNumericIndex(parsed?.additional_info?.index);
-          shouldApplyIndexation =
-            statusIndicatesTrue(innerLabel) ||
-            (statusIndex !== null && innerIndex !== null && innerIndex === statusIndex) ||
-            (statusIndex === null && innerIndex === 1);
-        } catch {
-          // ignore
-        }
-      }
+      shouldApplyIndexation = await resolveShouldApplyIndexation(cv);
+      logger.info('Supplier indexation status resolved', {
+        shouldApplyIndexation,
+      });
     }
   }
 
@@ -779,6 +865,22 @@ export async function calculateSupplierPayment(
     if (!supplierItem.linkedContractId) {
       await updateSupplierCalculationStatus(supplierItem.id, 'כשל');
       return { success: false, error: 'Missing linked supplier contract' };
+    }
+
+    if (!supplierItem.shouldApplyIndexation) {
+      const totalPayment = principalToClose;
+      logger.info('Supplier total payment calculation (no indexation)', {
+        supplierPaymentItemId,
+        principalToClose,
+        totalPayment,
+      });
+      await updateSupplierCalculationStatus(supplierItem.id, 'סיים', totalPayment);
+      return {
+        success: true,
+        principalPayment: principalToClose,
+        indexedPayment: 0,
+        totalPayment,
+      };
     }
 
     const contractInfo = await fetchSupplierContractIndexationInfo(

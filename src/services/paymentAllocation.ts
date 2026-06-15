@@ -14,6 +14,7 @@
 
 import { mondayQuery } from './mondayApi';
 import { logger } from '../logger';
+import { resolveVxStatus } from './mondayVxStatus';
 import {
   ACTUAL_PAYMENTS,
   CONTRACTUAL_PAYMENTS,
@@ -334,7 +335,14 @@ export async function findMatchingContractualItems(
   contractId: number,
   paymentCategory: PaymentCategory
 ): Promise<ContractualPaymentItem[]> {
-  type ContractualColumnValue = { id: string; value?: string | null; text?: string | null; label?: string | null; linked_item_ids?: string[] };
+  type ContractualColumnValue = {
+    id: string;
+    value?: string | null;
+    text?: string | null;
+    label?: string | null;
+    index?: number | null;
+    linked_item_ids?: string[];
+  };
   const allItems: Array<{ id: string; name: string; column_values: ContractualColumnValue[] }> = [];
   let cursor: string | null = null;
 
@@ -365,6 +373,7 @@ export async function findMatchingContractualItems(
                 }
                 ... on StatusValue {
                   label
+                  index
                 }
               }
             }
@@ -388,6 +397,7 @@ export async function findMatchingContractualItems(
                 }
                 ... on StatusValue {
                   label
+                  index
                 }
               }
             }
@@ -451,12 +461,13 @@ export async function findMatchingContractualItems(
     return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
   }
 
-  const contractual: ContractualPaymentItem[] = items.map((item) => {
+  const contractual: ContractualPaymentItem[] = [];
+  for (const item of items) {
     let principalBeforeVat = 0;
     let contractualDueDate: string | null = null;
-    let indexLinkedStatus: "V" | "X" = "V";
-    let interestChargeStatus: "V" | "X" = "V";
     let rowPaymentCategory: PaymentCategory = 'דירה';
+    let indexLinkedCv: ContractualColumnValue | undefined;
+    let interestChargeCv: ContractualColumnValue | undefined;
 
     for (const cv of item.column_values) {
       try {
@@ -466,13 +477,9 @@ export async function findMatchingContractualItems(
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.paymentCategory) {
           rowPaymentCategory = parsePaymentCategoryLabel(cv as ContractualColumnValue);
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexLinkedStatus) {
-          const labelRaw = (cv as ContractualColumnValue).label ?? (cv as ContractualColumnValue).text ?? parsed.label ?? parsed.additional_info?.label;
-          const label = (labelRaw ?? "").toString().trim().toUpperCase();
-          indexLinkedStatus = label === "X" ? "X" : "V";
+          indexLinkedCv = cv as ContractualColumnValue;
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.interestChargeStatus) {
-          const labelRaw = (cv as ContractualColumnValue).label ?? (cv as ContractualColumnValue).text ?? parsed.label ?? parsed.additional_info?.label;
-          const label = (labelRaw ?? "").toString().trim().toUpperCase();
-          interestChargeStatus = label === "X" ? "X" : "V";
+          interestChargeCv = cv as ContractualColumnValue;
         } else {
           const val = parseFloat(parsed.value ?? parsed) || 0;
           if (cv.id === CONTRACTUAL_PAYMENTS.items.principalBeforeVat) principalBeforeVat = val;
@@ -483,13 +490,9 @@ export async function findMatchingContractualItems(
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.paymentCategory) {
           rowPaymentCategory = parsePaymentCategoryLabel(cv as ContractualColumnValue);
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexLinkedStatus) {
-          const labelRaw = (cv as ContractualColumnValue).label ?? (cv as ContractualColumnValue).text ?? cv.value;
-          const label = (labelRaw ?? "").toString().trim().toUpperCase();
-          indexLinkedStatus = label === "X" ? "X" : "V";
+          indexLinkedCv = cv as ContractualColumnValue;
         } else if (cv.id === CONTRACTUAL_PAYMENTS.items.interestChargeStatus) {
-          const labelRaw = (cv as ContractualColumnValue).label ?? (cv as ContractualColumnValue).text ?? cv.value;
-          const label = (labelRaw ?? "").toString().trim().toUpperCase();
-          interestChargeStatus = label === "X" ? "X" : "V";
+          interestChargeCv = cv as ContractualColumnValue;
         } else {
           const val = parseFloat(cv.value ?? '') || 0;
           if (cv.id === CONTRACTUAL_PAYMENTS.items.principalBeforeVat) principalBeforeVat = val;
@@ -497,11 +500,24 @@ export async function findMatchingContractualItems(
       }
     }
 
+    const [indexLinkedStatus, interestChargeStatus] = await Promise.all([
+      resolveVxStatus(
+        indexLinkedCv,
+        CONTRACTUAL_PAYMENTS.boardId,
+        CONTRACTUAL_PAYMENTS.items.indexLinkedStatus
+      ),
+      resolveVxStatus(
+        interestChargeCv,
+        CONTRACTUAL_PAYMENTS.boardId,
+        CONTRACTUAL_PAYMENTS.items.interestChargeStatus
+      ),
+    ]);
+
     // Principal for first subitem — allow negative (discount / credit).
     const principal = round(principalBeforeVat);
     const paymentOrder = parsePaymentOrder(item.name ?? '');
 
-    return {
+    contractual.push({
       id: item.id,
       name: item.name ?? '',
       paymentOrder,
@@ -510,8 +526,8 @@ export async function findMatchingContractualItems(
       indexLinkedStatus,
       interestChargeStatus,
       paymentCategory: rowPaymentCategory,
-    };
-  });
+    });
+  }
 
   const filtered = contractual.filter((c) => c.paymentCategory === paymentCategory);
 
