@@ -50,8 +50,6 @@ export interface ContractualPaymentItem {
   name: string;
   /** Tie-breaker when contractual due dates match (leading digits from item name). */
   paymentOrder: number;
-  paymentDue: number;
-  indexationPaymentDue: number;
   principal: number;
   contractualDueDate: string | null;
   /** "V" = index-linked, "X" = not index-linked (indexation always 0). Default "V" when unset. */
@@ -342,9 +340,6 @@ export async function findMatchingContractualItems(
 
   const columnIds = [
     CONTRACTUAL_PAYMENTS.items.contractLink,
-    CONTRACTUAL_PAYMENTS.items.paymentDue,
-    CONTRACTUAL_PAYMENTS.items.principalDue,
-    CONTRACTUAL_PAYMENTS.items.indexationPaymentDue,
     CONTRACTUAL_PAYMENTS.items.contractualDueDate,
     CONTRACTUAL_PAYMENTS.items.indexLinkedStatus,
     CONTRACTUAL_PAYMENTS.items.interestChargeStatus,
@@ -457,10 +452,7 @@ export async function findMatchingContractualItems(
   }
 
   const contractual: ContractualPaymentItem[] = items.map((item) => {
-    let paymentDue = 0;
-    let principalDue = 0;
     let principalBeforeVat = 0;
-    let indexationPaymentDue = 0;
     let contractualDueDate: string | null = null;
     let indexLinkedStatus: "V" | "X" = "V";
     let interestChargeStatus: "V" | "X" = "V";
@@ -483,10 +475,7 @@ export async function findMatchingContractualItems(
           interestChargeStatus = label === "X" ? "X" : "V";
         } else {
           const val = parseFloat(parsed.value ?? parsed) || 0;
-          if (cv.id === CONTRACTUAL_PAYMENTS.items.paymentDue) paymentDue = val;
-          else if (cv.id === CONTRACTUAL_PAYMENTS.items.principalDue) principalDue = val;
-          else if (cv.id === CONTRACTUAL_PAYMENTS.items.principalBeforeVat) principalBeforeVat = val;
-          else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexationPaymentDue) indexationPaymentDue = val;
+          if (cv.id === CONTRACTUAL_PAYMENTS.items.principalBeforeVat) principalBeforeVat = val;
         }
       } catch {
         if (cv.id === CONTRACTUAL_PAYMENTS.items.contractualDueDate) {
@@ -503,26 +492,19 @@ export async function findMatchingContractualItems(
           interestChargeStatus = label === "X" ? "X" : "V";
         } else {
           const val = parseFloat(cv.value ?? '') || 0;
-          if (cv.id === CONTRACTUAL_PAYMENTS.items.paymentDue) paymentDue = val;
-          else if (cv.id === CONTRACTUAL_PAYMENTS.items.principalDue) principalDue = val;
-          else if (cv.id === CONTRACTUAL_PAYMENTS.items.principalBeforeVat) principalBeforeVat = val;
-          else if (cv.id === CONTRACTUAL_PAYMENTS.items.indexationPaymentDue) indexationPaymentDue = val;
+          if (cv.id === CONTRACTUAL_PAYMENTS.items.principalBeforeVat) principalBeforeVat = val;
         }
       }
     }
 
-    // Principal for first subitem — allow negative (discount / credit). Prefer קרן לפני מע"מ when non-zero; else legacy columns.
-    const principal = round(
-      principalBeforeVat !== 0 ? principalBeforeVat : principalDue || paymentDue
-    );
+    // Principal for first subitem — allow negative (discount / credit).
+    const principal = round(principalBeforeVat);
     const paymentOrder = parsePaymentOrder(item.name ?? '');
 
     return {
       id: item.id,
       name: item.name ?? '',
       paymentOrder,
-      paymentDue,
-      indexationPaymentDue,
       principal,
       contractualDueDate,
       indexLinkedStatus,

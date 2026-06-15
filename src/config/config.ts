@@ -1,10 +1,6 @@
 export const CONTRACTUAL_PAYMENTS = {
   boardId: "5092167973",
   items: {
-    paymentDue: "numeric_mm0tv8dx",
-    /** Contractual principal - used for first subitem's remaining principal before payment */
-    principalDue: "numeric_mm0tv8dx",
-    indexationPaymentDue: "numeric_mm117vgw",
     /** Contract link column - links to the same contract as Actual Payments */
     contractLink: "board_relation_mm0tcdy3",
     /** Contractual due date (e.g. display / sorting) */
@@ -15,7 +11,7 @@ export const CONTRACTUAL_PAYMENTS = {
     interestChargeStatus: "color_mm2chzyh",
     /** דירה | רישום זכויות — receipts only clear lines with the same category */
     paymentCategory: "color_mm2b2889",
-    /** קרן לפני מע"מ — principal balance for allocation (interest/indexation/principal); overrides legacy payment column when non-zero */
+    /** קרן לפני מע"מ — principal balance for allocation (interest/indexation/principal) */
     principalBeforeVat: "numeric_mm2bhrm1",
   } as const,
   subitems: {
