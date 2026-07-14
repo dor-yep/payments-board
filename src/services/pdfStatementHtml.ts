@@ -89,7 +89,7 @@ function renderPaymentRows(rows: PaymentStatementRow[]): string {
       const due = row.visualStatus === 'due' ? 'row-due' : '';
       const dueClass = row.visualStatus === 'due' ? 'amount-due' : '';
       const mergedStart = `
-        <td rowspan="${rowSpan}" class="cell-center cell-identity">${text(row.milestoneNumber)}</td>
+        <td rowspan="${rowSpan}" class="cell-center cell-identity">${ltr(formatDateHe(row.contractualDueDate))}</td>
         <td rowspan="${rowSpan}" class="cell-wrap cell-identity">${text(row.milestoneDescription)}</td>
         <td rowspan="${rowSpan}" class="cell-num ${dueClass}">${ltr(formatCurrency(row.principalIncludingVat))}</td>
         <td rowspan="${rowSpan}" class="${dueClass}">${text(row.indexMonth ?? '--')}</td>
@@ -479,7 +479,7 @@ export function buildPaymentStatementHtml(
             <th colspan="2">יתרה</th>
           </tr>
           <tr class="col-header">
-            <th>שלב</th>
+            <th>תאריך חוזי</th>
             <th>תיאור אבן דרך</th>
             <th>סכום מקורי (קרן)</th>
             <th>חודש מדד</th>

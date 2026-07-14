@@ -185,7 +185,7 @@ export interface PaymentReceiptRow {
 }
 
 export interface PaymentStatementRow {
-  milestoneNumber: number;
+  contractualDueDate: string | null;
   milestoneDescription: string;
   principalIncludingVat: number | null;
   indexMonth: string | null;
@@ -532,6 +532,38 @@ function statusBadgeFor(
   return 'עתידי';
 }
 
+function emptyReceipts(): PaymentReceiptRow[] {
+  return [{
+    receiptDate: null,
+    receiptAmount: null,
+    principalPaid: null,
+    indexationPaid: null,
+    interestPaid: null,
+  }];
+}
+
+/**
+ * Indexation on remaining principal from the last receipt's index through today's index.
+ * Presentation only — does not change allocation rules when applying payments.
+ */
+function indexationFromLastPaymentToToday(
+  remainingPrincipal: number,
+  lastPaymentIndex: number | null,
+  todayIndex: number,
+  indexLinked: boolean
+): { indexation: number; indexChangePercent: number } {
+  if (!indexLinked || remainingPrincipal <= 0 || !lastPaymentIndex || lastPaymentIndex <= 0 || todayIndex <= 0) {
+    return { indexation: 0, indexChangePercent: 0 };
+  }
+  const ratio = todayIndex / lastPaymentIndex;
+  const indexation = round(remainingPrincipal * (ratio - 1));
+  const indexChangePercent = round((ratio - 1) * 100);
+  return {
+    indexation: Math.max(indexation, 0),
+    indexChangePercent,
+  };
+}
+
 function sanitizeFilename(name: string): string {
   const cleaned = name
     .replace(/[^\w\u0590-\u05FF\s-]/g, '')
@@ -587,8 +619,7 @@ export async function buildPaymentStatement(
   let currentRemainingBalance = 0;
   let nextPaymentAssigned = false;
 
-  for (let i = 0; i < contractualItems.length; i++) {
-    const item = contractualItems[i];
+  for (const item of contractualItems) {
     const isRegistration = item.paymentCategory === 'רישום זכויות';
     const [extras, subitems] = await Promise.all([
       fetchContractualPaymentExtras(item.id),
@@ -598,27 +629,28 @@ export async function buildPaymentStatement(
     const vatPercent = subitems.length > 0
       ? (subitems[subitems.length - 1].vatPercent ?? 0)
       : 0;
+    const vatMult = vatGrossMultiplier(vatPercent);
 
     const receipts: PaymentReceiptRow[] = subitems.map((s) => {
       const lineVat = s.vatPercent ?? vatPercent;
-      const vatMult = vatGrossMultiplier(lineVat);
+      const lineVatMult = vatGrossMultiplier(lineVat);
       return {
         receiptDate: parseSubitemNameToIsoDate(s.name) ?? s.name,
         receiptAmount: s.receiptAmount,
         principalPaid:
-          s.principalPaid != null ? round(s.principalPaid * vatMult) : null,
+          s.principalPaid != null ? round(s.principalPaid * lineVatMult) : null,
         indexationPaid:
-          s.indexationPaid != null ? round(s.indexationPaid * vatMult) : null,
+          s.indexationPaid != null ? round(s.indexationPaid * lineVatMult) : null,
         interestPaid:
-          s.interestPaid != null ? round(s.interestPaid * vatMult) : null,
+          s.interestPaid != null ? round(s.interestPaid * lineVatMult) : null,
       };
     });
 
     for (const s of subitems) {
       const lineVat = s.vatPercent ?? vatPercent;
-      const vatMult = vatGrossMultiplier(lineVat);
-      totalPrincipalPaid += round((s.principalPaid ?? 0) * vatMult);
-      totalIndexationPaid += round((s.indexationPaid ?? 0) * vatMult);
+      const lineVatMult = vatGrossMultiplier(lineVat);
+      totalPrincipalPaid += round((s.principalPaid ?? 0) * lineVatMult);
+      totalIndexationPaid += round((s.indexationPaid ?? 0) * lineVatMult);
     }
 
     const previous = await getPreviousSubitemBalances(
@@ -626,26 +658,11 @@ export async function buildPaymentStatement(
       item.principal,
       item.paymentCategory
     );
-    const paymentBase = Math.max(previous.remainingPrincipal, 0);
-
-    let indexMonth: string | null = null;
-    let indexValue: number | null = null;
-    let indexChangePercent: number | null = null;
-    let indexationAmount: number | null = null;
-    let currentBalance: number | null = null;
-
-    if (subitems.length > 0) {
-      const latest = subitems[subitems.length - 1];
-      indexValue = latest.currentIndexValue;
-      indexChangePercent = latest.indexChangePercent;
-      indexationAmount = round(subitems.reduce((sum, s) => sum + (s.indexationPaid ?? 0), 0));
-
-      const latestDate = parseSubitemNameToIsoDate(latest.name);
-      if (latestDate) {
-        const idx = await fetchIndexForPaymentDate(latestDate);
-        indexMonth = formatIndexPeriodHebrew(idx?.period ?? null);
-      }
-    }
+    // Keep the signed remaining principal — negative = open credit / discount
+    const remainingPrincipalRaw = previous.remainingPrincipal;
+    const remainingPrincipalPositive = Math.max(remainingPrincipalRaw, 0);
+    const isCredit = remainingPrincipalRaw < 0 || item.principal < 0;
+    const paymentBase = remainingPrincipalPositive;
 
     const { balances, remaining } = await computeBalancesBeforePayment(
       item.id,
@@ -658,90 +675,125 @@ export async function buildPaymentStatement(
       indexToday?.period ?? ''
     );
 
+    // Do not clamp to ≥0 — open credits (negative principal) must still appear
     const balancePreVat = round(
-      Math.max(remaining.principal, 0) +
-        Math.max(remaining.interest, 0) +
-        Math.max(remaining.indexation, 0)
+      remaining.principal + remaining.interest + remaining.indexation
     );
-    currentBalance = round(balancePreVat * vatGrossMultiplier(vatPercent));
-
-    if (subitems.length === 0 && !isRegistration) {
-      indexValue = balances.currentIndexValue || null;
-      indexChangePercent = balances.indexChangePercent;
-      indexMonth = formatIndexPeriodHebrew(indexToday?.period ?? null);
-      indexationAmount = round(Math.max(remaining.indexation, 0));
-    } else if (balancePreVat > 0 && !isRegistration) {
-      indexationAmount = round(
-        (indexationAmount ?? 0) + Math.max(remaining.indexation, 0)
-      );
-    }
-
-    if (isRegistration) {
-      indexMonth = null;
-      indexValue = null;
-      indexChangePercent = null;
-      indexationAmount = null;
-    }
-
     const isFullyPaid =
-      balancePreVat === 0 ||
-      extras.paymentStatusLabel === 'הושלם';
+      extras.paymentStatusLabel === 'הושלם' ||
+      balancePreVat === 0;
+    const hasReceipts = subitems.length > 0;
+    const isPartial = hasReceipts && !isFullyPaid;
 
-    const isNextPayment = !isFullyPaid && !nextPaymentAssigned;
+    const latest = hasReceipts ? subitems[subitems.length - 1] : null;
+    const latestDate = latest ? parseSubitemNameToIsoDate(latest.name) : null;
+    let paidIndexMonth: string | null = null;
+    if (latestDate) {
+      const idx = await fetchIndexForPaymentDate(latestDate);
+      paidIndexMonth = formatIndexPeriodHebrew(idx?.period ?? null);
+    }
+    const paidIndexationGross = round(
+      subitems.reduce((sum, s) => {
+        const lineVatMult = vatGrossMultiplier(s.vatPercent ?? vatPercent);
+        return sum + round((s.indexationPaid ?? 0) * lineVatMult);
+      }, 0)
+    );
 
-    let visualStatus: PaymentVisualStatus;
+    // ── Paid portion (green): existing receipts on this contractual payment ──
+    if (hasReceipts) {
+      rows.push({
+        contractualDueDate: item.contractualDueDate,
+        milestoneDescription: item.name,
+        principalIncludingVat: extras.principalIncludingVat,
+        indexMonth: isRegistration ? null : paidIndexMonth,
+        indexValue: isRegistration ? null : (latest?.currentIndexValue ?? null),
+        indexChangePercent: isRegistration ? null : (latest?.indexChangePercent ?? null),
+        indexationAmount: isRegistration ? null : paidIndexationGross,
+        receipts,
+        currentBalance: 0,
+        statusLabel: extras.paymentStatusLabel,
+        visualStatus: 'paid',
+        statusBadge: statusBadgeFor('paid', item.paymentCategory),
+        paymentCategory: item.paymentCategory,
+      });
+    }
+
     if (isFullyPaid) {
-      visualStatus = 'paid';
-    } else if (isNextPayment) {
+      continue;
+    }
+
+    // ── Remaining / next / future / open-credit unpaid portion ──
+    // Credits and registration lines never take the red "next apartment payment" slot
+    const isNextPayment =
+      !nextPaymentAssigned && !isCredit && !isRegistration;
+    let visualStatus: PaymentVisualStatus;
+    let indexMonth: string | null = null;
+    let indexValue: number | null = null;
+    let indexChangePercent: number | null = null;
+    let indexationAmount: number | null = null;
+    let currentBalance: number | null = null;
+    // Preserve sign so negative credits display as negative amounts
+    let residualPrincipalInclVat: number | null = round(remainingPrincipalRaw * vatMult);
+
+    if (isNextPayment) {
       visualStatus = 'due';
       nextPaymentAssigned = true;
-      if (!isRegistration) {
-        // Next payment: always show indexation/interest calculated as of today
-        indexValue = balances.currentIndexValue || null;
-        indexChangePercent = balances.indexChangePercent;
-        indexMonth = formatIndexPeriodHebrew(indexToday?.period ?? null);
-        const paidIndexation = subitems.reduce((sum, s) => sum + (s.indexationPaid ?? 0), 0);
-        indexationAmount = round(paidIndexation + Math.max(remaining.indexation, 0));
-      } else {
-        const remainingPrincipal = Math.max(previous.remainingPrincipal, 0);
-        currentBalance = round(remainingPrincipal * vatGrossMultiplier(vatPercent));
-      }
-    } else {
+
+      const lastPaymentIndex =
+        latest?.currentIndexValue && latest.currentIndexValue > 0
+          ? latest.currentIndexValue
+          : balances.indexationBaseIndex || null;
+      const todayIndex = indexToday?.value ?? balances.currentIndexValue;
+      const accrued = indexationFromLastPaymentToToday(
+        remainingPrincipalPositive,
+        lastPaymentIndex,
+        todayIndex,
+        item.indexLinkedStatus !== 'X'
+      );
+      const interestPreVat = Math.max(remaining.interest, 0);
+      const indexationPreVat = accrued.indexation;
+      currentBalance = round(
+        (remainingPrincipalPositive + interestPreVat + indexationPreVat) * vatMult
+      );
+      indexMonth = formatIndexPeriodHebrew(indexToday?.period ?? null);
+      indexValue = todayIndex || null;
+      indexChangePercent = accrued.indexChangePercent;
+      indexationAmount = round(indexationPreVat * vatMult);
+    } else if (isRegistration || isCredit) {
+      // Open registration / credit: show signed principal only (no indexation)
       visualStatus = 'future';
-      // Future payments: principal only, no indexation/interest calculation
+      currentBalance = residualPrincipalInclVat;
       indexMonth = null;
       indexValue = null;
       indexChangePercent = null;
       indexationAmount = null;
-      const remainingPrincipal = Math.max(previous.remainingPrincipal, 0);
-      currentBalance = round(remainingPrincipal * vatGrossMultiplier(vatPercent));
+    } else {
+      visualStatus = 'future';
+      currentBalance = residualPrincipalInclVat;
+      indexMonth = null;
+      indexValue = null;
+      indexChangePercent = null;
+      indexationAmount = null;
     }
 
-    if (!isFullyPaid) {
-      currentRemainingBalance += currentBalance ?? 0;
-    }
+    currentRemainingBalance += currentBalance ?? 0;
 
-    // סכום הצמדה: present including VAT so it matches receipt/balance columns
-    if (indexationAmount != null) {
-      indexationAmount = round(indexationAmount * vatGrossMultiplier(vatPercent));
-    }
+    const residualDescription = isPartial
+      ? `${item.name} — יתרה`
+      : item.name;
 
     rows.push({
-      milestoneNumber: i + 1,
-      milestoneDescription: item.name,
-      principalIncludingVat: extras.principalIncludingVat,
+      contractualDueDate: item.contractualDueDate,
+      milestoneDescription: residualDescription,
+      principalIncludingVat: isPartial
+        ? residualPrincipalInclVat
+        : (extras.principalIncludingVat ?? residualPrincipalInclVat),
       indexMonth,
       indexValue,
       indexChangePercent,
       indexationAmount,
-      receipts: receipts.length > 0 ? receipts : [{
-        receiptDate: null,
-        receiptAmount: null,
-        principalPaid: null,
-        indexationPaid: null,
-        interestPaid: null,
-      }],
-      currentBalance: isFullyPaid ? 0 : currentBalance,
+      receipts: emptyReceipts(),
+      currentBalance,
       statusLabel: extras.paymentStatusLabel,
       visualStatus,
       statusBadge: statusBadgeFor(visualStatus, item.paymentCategory),
