@@ -69,6 +69,38 @@ export const CONTRACTS_BOARD = {
   } as const,
 } as const;
 
+/** Contracts board that triggers the PDF statement webhook */
+export const PDF_CONTRACTS_BOARD = {
+  boardId: "5092167972",
+  columns: {
+    name: "name",
+    project: "formula_mm112ey7",
+    signingDate: "lookup_mm3r7rzz",
+    apartmentRelation: "board_relation_mm0trn2a",
+    totalContractAmount: "lookup_mm0tebx0",
+    contractNumber: "text_mm11ggqh",
+    /** PDF generation status: סיים | נכשל */
+    pdfGenerationStatus: "color_mm58z2g3",
+    /** Generated payment statement PDF */
+    pdfDocument: "file_mm588g4m",
+  } as const,
+} as const;
+
+/** Apartments board - linked from contract for building info */
+export const APARTMENTS_BOARD = {
+  boardId: "5092167970",
+  columns: {
+    buildingRelation: "board_relation_mm0t95bg",
+    /** Original apartment price (lookup from related source) */
+    originalApartmentPrice: "lookup_mm0tttye",
+  } as const,
+} as const;
+
+/** Extra contractual payment columns used by the PDF statement */
+export const PDF_CONTRACTUAL_PAYMENTS = {
+  principalIncludingVat: "numeric_mm0tv8dx",
+} as const;
+
 export const ACTUAL_PAYMENTS = {
   boardId: "5092169396",
   columns: {

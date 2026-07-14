@@ -108,7 +108,7 @@ function round(value: number): number {
  * Gross = net × (1 + rate). Board may store VAT as a fraction (0.18) or as percent (18).
  * Matches spreadsheet-style *(1+numeric_mm2bkbnx) whether the cell is 0.18 or 18.
  */
-function vatGrossMultiplier(vatRate: number): number {
+export function vatGrossMultiplier(vatRate: number): number {
   const v = Number.isFinite(vatRate) ? vatRate : 0;
   if (v === 0) return 1;
   if (Math.abs(v) < 1) return 1 + v;
