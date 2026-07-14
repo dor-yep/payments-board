@@ -523,7 +523,10 @@ function statusBadgeFor(
   visualStatus: PaymentVisualStatus,
   paymentCategory: PaymentCategory
 ): string {
-  if (paymentCategory === 'רישום זכויות') return 'רישום זכויות';
+  if (paymentCategory === 'רישום זכויות') {
+    if (visualStatus === 'paid') return 'רישום זכויות · שולם';
+    return 'רישום זכויות';
+  }
   if (visualStatus === 'paid') return 'שולם';
   if (visualStatus === 'due') return 'פתוח';
   return 'עתידי';
@@ -596,17 +599,26 @@ export async function buildPaymentStatement(
       ? (subitems[subitems.length - 1].vatPercent ?? 0)
       : 0;
 
-    const receipts: PaymentReceiptRow[] = subitems.map((s) => ({
-      receiptDate: parseSubitemNameToIsoDate(s.name) ?? s.name,
-      receiptAmount: s.receiptAmount,
-      principalPaid: s.principalPaid,
-      indexationPaid: s.indexationPaid,
-      interestPaid: s.interestPaid,
-    }));
+    const receipts: PaymentReceiptRow[] = subitems.map((s) => {
+      const lineVat = s.vatPercent ?? vatPercent;
+      const vatMult = vatGrossMultiplier(lineVat);
+      return {
+        receiptDate: parseSubitemNameToIsoDate(s.name) ?? s.name,
+        receiptAmount: s.receiptAmount,
+        principalPaid:
+          s.principalPaid != null ? round(s.principalPaid * vatMult) : null,
+        indexationPaid:
+          s.indexationPaid != null ? round(s.indexationPaid * vatMult) : null,
+        interestPaid:
+          s.interestPaid != null ? round(s.interestPaid * vatMult) : null,
+      };
+    });
 
     for (const s of subitems) {
-      totalPrincipalPaid += s.principalPaid ?? 0;
-      totalIndexationPaid += s.indexationPaid ?? 0;
+      const lineVat = s.vatPercent ?? vatPercent;
+      const vatMult = vatGrossMultiplier(lineVat);
+      totalPrincipalPaid += round((s.principalPaid ?? 0) * vatMult);
+      totalIndexationPaid += round((s.indexationPaid ?? 0) * vatMult);
     }
 
     const previous = await getPreviousSubitemBalances(
@@ -707,6 +719,11 @@ export async function buildPaymentStatement(
 
     if (!isFullyPaid) {
       currentRemainingBalance += currentBalance ?? 0;
+    }
+
+    // סכום הצמדה: present including VAT so it matches receipt/balance columns
+    if (indexationAmount != null) {
+      indexationAmount = round(indexationAmount * vatGrossMultiplier(vatPercent));
     }
 
     rows.push({

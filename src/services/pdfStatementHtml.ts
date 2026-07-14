@@ -27,6 +27,16 @@ function statusClass(status: PaymentVisualStatus, paymentCategory?: string): str
   return 'badge-future';
 }
 
+function renderStatusBadges(row: PaymentStatementRow): string {
+  if (row.paymentCategory === 'רישום זכויות' && row.visualStatus === 'paid') {
+    return `
+      <span class="badge badge-registration">${text('רישום זכויות')}</span>
+      <span class="badge badge-paid">${text('שולם')}</span>
+    `;
+  }
+  return `<span class="badge ${statusClass(row.visualStatus, row.paymentCategory)}">${text(row.statusBadge)}</span>`;
+}
+
 function amountClass(status: PaymentVisualStatus): string {
   if (status === 'paid') return 'amount-paid';
   if (status === 'due') return 'amount-due';
@@ -53,15 +63,20 @@ function receiptRows(row: PaymentStatementRow): PaymentStatementRow['receipts'] 
 
 function renderReceiptCells(
   receipt: PaymentStatementRow['receipts'][number],
-  paidHighlight: boolean
+  visualStatus: PaymentVisualStatus
 ): string {
-  const paidClass = paidHighlight ? 'amount-paid' : 'amount-default';
+  const valueClass =
+    visualStatus === 'paid'
+      ? 'amount-paid'
+      : visualStatus === 'due'
+        ? 'amount-due'
+        : 'amount-default';
   return `
-    <td>${ltr(formatDateHe(receipt.receiptDate))}</td>
-    <td class="${paidClass}">${ltr(formatCurrency(receipt.receiptAmount))}</td>
-    <td class="${paidClass}">${ltr(formatCurrency(receipt.principalPaid))}</td>
-    <td class="${paidClass}">${ltr(formatCurrency(receipt.indexationPaid))}</td>
-    <td class="${paidClass}">${ltr(formatCurrency(receipt.interestPaid))}</td>
+    <td class="${valueClass}">${ltr(formatDateHe(receipt.receiptDate))}</td>
+    <td class="${valueClass}">${ltr(formatCurrency(receipt.receiptAmount))}</td>
+    <td class="${valueClass}">${ltr(formatCurrency(receipt.principalPaid))}</td>
+    <td class="${valueClass}">${ltr(formatCurrency(receipt.indexationPaid))}</td>
+    <td class="${valueClass}">${ltr(formatCurrency(receipt.interestPaid))}</td>
   `;
 }
 
@@ -71,35 +86,37 @@ function renderPaymentRows(rows: PaymentStatementRow[]): string {
       const receipts = receiptRows(row);
       const rowSpan = receipts.length;
       const alt = groupIndex % 2 === 1 ? 'row-alt' : '';
+      const due = row.visualStatus === 'due' ? 'row-due' : '';
+      const dueClass = row.visualStatus === 'due' ? 'amount-due' : '';
       const mergedStart = `
-        <td rowspan="${rowSpan}" class="cell-center">${text(row.milestoneNumber)}</td>
-        <td rowspan="${rowSpan}" class="cell-wrap">${text(row.milestoneDescription)}</td>
-        <td rowspan="${rowSpan}" class="cell-num">${ltr(formatCurrency(row.principalIncludingVat))}</td>
-        <td rowspan="${rowSpan}">${text(row.indexMonth ?? '--')}</td>
-        <td rowspan="${rowSpan}" class="cell-center">${ltr(formatNumber(row.indexValue))}</td>
-        <td rowspan="${rowSpan}" class="cell-center">${ltr(formatPercent(row.indexChangePercent))}</td>
-        <td rowspan="${rowSpan}" class="cell-num">${ltr(formatCurrency(row.indexationAmount))}</td>
+        <td rowspan="${rowSpan}" class="cell-center cell-identity">${text(row.milestoneNumber)}</td>
+        <td rowspan="${rowSpan}" class="cell-wrap cell-identity">${text(row.milestoneDescription)}</td>
+        <td rowspan="${rowSpan}" class="cell-num ${dueClass}">${ltr(formatCurrency(row.principalIncludingVat))}</td>
+        <td rowspan="${rowSpan}" class="${dueClass}">${text(row.indexMonth ?? '--')}</td>
+        <td rowspan="${rowSpan}" class="cell-center ${dueClass}">${ltr(formatNumber(row.indexValue))}</td>
+        <td rowspan="${rowSpan}" class="cell-center ${dueClass}">${ltr(formatPercent(row.indexChangePercent))}</td>
+        <td rowspan="${rowSpan}" class="cell-num ${dueClass}">${ltr(formatCurrency(row.indexationAmount))}</td>
       `;
       const mergedEnd = `
         <td rowspan="${rowSpan}" class="cell-num ${amountClass(row.visualStatus)}">${ltr(formatCurrency(row.currentBalance))}</td>
-        <td rowspan="${rowSpan}" class="cell-center">
-          <span class="badge ${statusClass(row.visualStatus, row.paymentCategory)}">${text(row.statusBadge)}</span>
+        <td rowspan="${rowSpan}" class="cell-center cell-status">
+          ${renderStatusBadges(row)}
         </td>
       `;
 
       const first = receipts[0];
       return `
-        <tr class="${alt}">
+        <tr class="${alt} ${due}">
           ${mergedStart}
-          ${renderReceiptCells(first, row.visualStatus === 'paid')}
+          ${renderReceiptCells(first, row.visualStatus)}
           ${mergedEnd}
         </tr>
         ${receipts
           .slice(1)
           .map(
             (receipt) => `
-        <tr class="${alt}">
-          ${renderReceiptCells(receipt, row.visualStatus === 'paid')}
+        <tr class="${alt} ${due}">
+          ${renderReceiptCells(receipt, row.visualStatus)}
         </tr>`
           )
           .join('')}
@@ -333,9 +350,20 @@ export function buildPaymentStatementHtml(
 
     tbody tr.row-alt td { background: #f7fafc; }
 
+    tbody tr.row-due td:not(.cell-identity) {
+      color: #c53030;
+      font-weight: 700;
+    }
+
+    tbody tr.row-due td:not(.cell-identity) .num {
+      color: #c53030;
+      font-weight: 700;
+    }
+
     .cell-center { text-align: center; }
     .cell-num { text-align: center; }
     .cell-wrap { text-align: right; }
+    .cell-identity { color: #2d3748; font-weight: 400; }
 
     .num, .card-num {
       unicode-bidi: isolate;
@@ -355,6 +383,11 @@ export function buildPaymentStatementHtml(
       font-size: 6.5pt;
       font-weight: 700;
       white-space: nowrap;
+      margin: 1px;
+    }
+
+    .cell-status {
+      line-height: 1.5;
     }
 
     .badge-paid { background: #c6f6d5; color: #276749; }
@@ -455,8 +488,8 @@ export function buildPaymentStatementHtml(
             <th>סכום הצמדה</th>
             <th>תאריך תשלום</th>
             <th>סכום תקבול</th>
-            <th>קרן ששולמה</th>
-            <th>מדד ששולם</th>
+            <th>קרן</th>
+            <th>הצמדה</th>
             <th>ריבית</th>
             <th>יתרה לתשלום</th>
             <th>סטטוס</th>
@@ -471,6 +504,7 @@ export function buildPaymentStatementHtml(
     <section class="notes">
       <h3 class="notes-title">${text('מתודולוגיית חישוב והצמדה למדד (חוק המכר החדש)')}</h3>
       <ul>
+        <li>${text('כל הסכומים הכספיים בדוח כוללים מע״מ.')}</li>
         <li>${text('מדד הבסיס נקבע לפי המדד הידוע ביום חתימת החוזה.')}</li>
         <li>${text('הפרשי המדד מחושבים כהפרש בין המדד הידוע ביום התשלום לבין מדד הבסיס.')}</li>
         <li>${text('חישוב ההצמדה מבוצע על 50% ממרכיב הבנייה בהתאם לחוק המכר.')}</li>
