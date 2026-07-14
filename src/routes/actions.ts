@@ -20,9 +20,9 @@ const router = Router();
 
 /** In-memory idempotency: skip duplicate webhooks within 5 minutes */
 const processedWebhooks = new Map<string, number>();
+/** Prevents concurrent PDF generation for the same contract; regenerating after completion is allowed */
 const pdfGenerationInFlight = new Set<string>();
 const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
-const PDF_IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;
 
 function getIdempotencyKey(event: { pulseId?: number; itemId?: number; triggerTime?: string; boardId?: number }): string {
   const id = event.pulseId ?? event.itemId ?? 'unknown';
@@ -65,7 +65,6 @@ function extractItemIdFromFields(fields: Record<string, unknown>): string | null
 interface CreatePdfRequestContext {
   itemId: string;
   boardId: string | null;
-  idempotencyKey: string;
   source: 'webhook' | 'action';
 }
 
@@ -79,7 +78,6 @@ function parseCreatePdfRequest(body: Record<string, unknown>): CreatePdfRequestC
     return {
       itemId,
       boardId: boardIdRaw != null ? String(boardIdRaw) : null,
-      idempotencyKey: getIdempotencyKey(event as Parameters<typeof getIdempotencyKey>[0]),
       source: 'webhook',
     };
   }
@@ -94,35 +92,16 @@ function parseCreatePdfRequest(body: Record<string, unknown>): CreatePdfRequestC
     const itemId = extractItemIdFromFields(fields);
     if (!itemId) return null;
 
-    const runtime = body.runtimeMetadata as Record<string, unknown> | undefined;
-    const actionUuid = runtime?.actionUuid ?? 'unknown';
     const boardIdRaw = fields.boardId ?? fields.board_id;
 
     return {
       itemId,
       boardId: boardIdRaw != null ? String(boardIdRaw) : null,
-      idempotencyKey: `action:${actionUuid}:${itemId}`,
       source: 'action',
     };
   }
 
   return null;
-}
-
-function isDuplicateByKey(key: string, ttlMs = IDEMPOTENCY_TTL_MS): boolean {
-  const now = Date.now();
-  if (processedWebhooks.has(key)) {
-    return true;
-  }
-  processedWebhooks.set(key, now);
-  for (const [k, t] of processedWebhooks) {
-    if (now - t > ttlMs) processedWebhooks.delete(k);
-  }
-  return false;
-}
-
-function getPdfDedupKey(itemId: string, boardId: string | null): string {
-  return `createPDF:${boardId ?? 'unknown'}:${itemId}`;
 }
 
 router.post('/apply-payment', mondayWebhookAuth, applyPaymentHandler);
@@ -211,7 +190,6 @@ async function createPdfHandler(req: Request, res: Response) {
   }
 
   const { itemId, boardId, source } = request;
-  const dedupKey = getPdfDedupKey(itemId, boardId);
 
   if (
     source === 'webhook' &&
@@ -225,11 +203,6 @@ async function createPdfHandler(req: Request, res: Response) {
   if (pdfGenerationInFlight.has(itemId)) {
     logger.info('createPDF already in progress, skipping', { itemId, source });
     return res.status(200).json({ received: true, skipped: 'in_progress' });
-  }
-
-  if (isDuplicateByKey(dedupKey, PDF_IDEMPOTENCY_TTL_MS)) {
-    logger.info('Duplicate createPDF request, skipping', { itemId, source });
-    return res.status(200).json({ received: true, skipped: 'duplicate' });
   }
 
   pdfGenerationInFlight.add(itemId);

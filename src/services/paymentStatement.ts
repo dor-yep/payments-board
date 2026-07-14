@@ -680,10 +680,23 @@ export async function buildPaymentStatement(
       remaining.principal + remaining.interest + remaining.indexation
     );
     const isFullyPaid =
-      extras.paymentStatusLabel === 'הושלם' ||
-      balancePreVat === 0;
+      !isCredit &&
+      (extras.paymentStatusLabel === 'הושלם' ||
+        balancePreVat === 0);
     const hasReceipts = subitems.length > 0;
     const isPartial = hasReceipts && !isFullyPaid;
+
+    if (isCredit) {
+      logger.info('Payment statement credit row detected', {
+        itemId: item.id,
+        name: item.name,
+        paymentCategory: item.paymentCategory,
+        status: extras.paymentStatusLabel,
+        principal: item.principal,
+        remainingPrincipal: remainingPrincipalRaw,
+        balancePreVat,
+      });
+    }
 
     const latest = hasReceipts ? subitems[subitems.length - 1] : null;
     const latestDate = latest ? parseSubitemNameToIsoDate(latest.name) : null;
@@ -785,9 +798,10 @@ export async function buildPaymentStatement(
     rows.push({
       contractualDueDate: item.contractualDueDate,
       milestoneDescription: residualDescription,
-      principalIncludingVat: isPartial
-        ? residualPrincipalInclVat
-        : (extras.principalIncludingVat ?? residualPrincipalInclVat),
+      principalIncludingVat:
+        isPartial || isCredit
+          ? residualPrincipalInclVat
+          : (extras.principalIncludingVat ?? residualPrincipalInclVat),
       indexMonth,
       indexValue,
       indexChangePercent,
