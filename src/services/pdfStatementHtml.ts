@@ -76,6 +76,16 @@ function receiptVisualStatus(
   return looksLikeActualReceipt ? 'paid' : rowStatus;
 }
 
+function renderIndexCells(receipt: PaymentStatementRow['receipts'][number]): string {
+  // Index columns stay default color (never red), even on יתרה / due rows
+  return `
+    <td class="cell-index">${text(receipt.indexMonth ?? '--')}</td>
+    <td class="cell-center cell-index">${ltr(formatNumber(receipt.indexValue ?? null))}</td>
+    <td class="cell-center cell-index">${ltr(formatPercent(receipt.indexChangePercent ?? null))}</td>
+    <td class="cell-num cell-index">${ltr(formatCurrency(receipt.indexationAmount ?? null))}</td>
+  `;
+}
+
 function renderReceiptCells(
   receipt: PaymentStatementRow['receipts'][number],
   rowStatus: PaymentVisualStatus
@@ -91,6 +101,7 @@ function renderReceiptCells(
     ? `<td class="${valueClass} cell-remainder">${text('יתרה')}</td>`
     : `<td class="${valueClass}">${ltr(formatDateHe(receipt.receiptDate))}</td>`;
   return `
+    ${renderIndexCells(receipt)}
     ${dateCell}
     <td class="${valueClass}">${ltr(formatCurrency(receipt.receiptAmount))}</td>
     <td class="${valueClass}">${ltr(formatCurrency(receipt.principalPaid))}</td>
@@ -107,19 +118,14 @@ function renderPaymentRows(rows: PaymentStatementRow[]): string {
       const hasPaidReceipts = receipts.some((r) => !r.isRemainder);
       const alt = groupIndex % 2 === 1 ? 'row-alt' : '';
       // Pure unpaid next payment: paint non-identity data red.
-      // Partial (paid receipts + יתרה): only the remainder sub-row and balance/index are red.
+      // Partial (paid receipts + יתרה): only the remainder receipt amounts are red.
       const fullRowDue = row.visualStatus === 'due' && !hasPaidReceipts;
       const due = fullRowDue ? 'row-due' : '';
       const principalClass = fullRowDue ? 'amount-due' : '';
-      const indexClass = row.visualStatus === 'due' ? 'amount-due' : '';
       const mergedStart = `
         <td rowspan="${rowSpan}" class="cell-center cell-identity">${ltrDateStacked(row.contractualDueDate)}</td>
         <td rowspan="${rowSpan}" class="cell-wrap cell-identity">${text(row.milestoneDescription)}</td>
         <td rowspan="${rowSpan}" class="cell-num ${principalClass}">${ltr(formatCurrency(row.principalIncludingVat))}</td>
-        <td rowspan="${rowSpan}" class="${indexClass}">${text(row.indexMonth ?? '--')}</td>
-        <td rowspan="${rowSpan}" class="cell-center ${indexClass}">${ltr(formatNumber(row.indexValue))}</td>
-        <td rowspan="${rowSpan}" class="cell-center ${indexClass}">${ltr(formatPercent(row.indexChangePercent))}</td>
-        <td rowspan="${rowSpan}" class="cell-num ${indexClass}">${ltr(formatCurrency(row.indexationAmount))}</td>
       `;
       const mergedEnd = `
         <td rowspan="${rowSpan}" class="cell-num ${amountClass(row.visualStatus)}">${ltr(formatCurrency(row.currentBalance))}</td>
@@ -374,12 +380,12 @@ export function buildPaymentStatementHtml(
 
     tbody tr.row-alt td { background: #f7fafc; }
 
-    tbody tr.row-due td:not(.cell-identity) {
+    tbody tr.row-due td:not(.cell-identity):not(.cell-index) {
       color: #c53030;
       font-weight: 700;
     }
 
-    tbody tr.row-due td:not(.cell-identity) .num {
+    tbody tr.row-due td:not(.cell-identity):not(.cell-index) .num {
       color: #c53030;
       font-weight: 700;
     }
@@ -388,6 +394,7 @@ export function buildPaymentStatementHtml(
     .cell-num { text-align: center; }
     .cell-wrap { text-align: right; }
     .cell-identity { color: #2d3748; font-weight: 400; }
+    .cell-index { color: #2d3748; font-weight: 400; }
 
     .num, .card-num {
       unicode-bidi: isolate;
@@ -520,7 +527,7 @@ export function buildPaymentStatementHtml(
             <th>סכום מקורי (קרן)</th>
             <th>חודש מדד</th>
             <th>ערך מדד</th>
-            <th>הפרש נקודות</th>
+            <th>אחוז שינוי %</th>
             <th>סכום הצמדה</th>
             <th>תאריך תשלום</th>
             <th>סכום תקבול</th>

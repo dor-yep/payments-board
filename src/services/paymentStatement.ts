@@ -182,6 +182,11 @@ export interface PaymentReceiptRow {
   principalPaid: number | null;
   indexationPaid: number | null;
   interestPaid: number | null;
+  /** Index info for this sub-row (splits when multiple receipts). */
+  indexMonth?: string | null;
+  indexValue?: number | null;
+  indexChangePercent?: number | null;
+  indexationAmount?: number | null;
   /** Leftover balance sub-row (not an actual Monday receipt). */
   isRemainder?: boolean;
   /** Per-sub-row color; paid receipts stay green, יתרה can be red. */
@@ -192,10 +197,6 @@ export interface PaymentStatementRow {
   contractualDueDate: string | null;
   milestoneDescription: string;
   principalIncludingVat: number | null;
-  indexMonth: string | null;
-  indexValue: number | null;
-  indexChangePercent: number | null;
-  indexationAmount: number | null;
   receipts: PaymentReceiptRow[];
   currentBalance: number | null;
   statusLabel: string | null;
@@ -536,13 +537,24 @@ function statusBadgeFor(
   return 'עתידי';
 }
 
-function emptyReceipts(): PaymentReceiptRow[] {
+function emptyReceipts(index?: {
+  indexMonth?: string | null;
+  indexValue?: number | null;
+  indexChangePercent?: number | null;
+  indexationAmount?: number | null;
+  visualStatus?: PaymentVisualStatus;
+}): PaymentReceiptRow[] {
   return [{
     receiptDate: null,
     receiptAmount: null,
     principalPaid: null,
     indexationPaid: null,
     interestPaid: null,
+    indexMonth: index?.indexMonth ?? null,
+    indexValue: index?.indexValue ?? null,
+    indexChangePercent: index?.indexChangePercent ?? null,
+    indexationAmount: index?.indexationAmount ?? null,
+    visualStatus: index?.visualStatus,
   }];
 }
 
@@ -635,21 +647,34 @@ export async function buildPaymentStatement(
       : 0;
     const vatMult = vatGrossMultiplier(vatPercent);
 
-    const receipts: PaymentReceiptRow[] = subitems.map((s) => {
-      const lineVat = s.vatPercent ?? vatPercent;
-      const lineVatMult = vatGrossMultiplier(lineVat);
-      return {
-        receiptDate: parseSubitemNameToIsoDate(s.name) ?? s.name,
-        receiptAmount: s.receiptAmount,
-        principalPaid:
-          s.principalPaid != null ? round(s.principalPaid * lineVatMult) : null,
-        indexationPaid:
-          s.indexationPaid != null ? round(s.indexationPaid * lineVatMult) : null,
-        interestPaid:
-          s.interestPaid != null ? round(s.interestPaid * lineVatMult) : null,
-        visualStatus: 'paid' as const,
-      };
-    });
+    const receipts: PaymentReceiptRow[] = await Promise.all(
+      subitems.map(async (s) => {
+        const lineVat = s.vatPercent ?? vatPercent;
+        const lineVatMult = vatGrossMultiplier(lineVat);
+        const indexationPaidGross =
+          s.indexationPaid != null ? round(s.indexationPaid * lineVatMult) : null;
+        const receiptIso = parseSubitemNameToIsoDate(s.name);
+        let indexMonth: string | null = null;
+        if (!isRegistration && receiptIso) {
+          const idx = await fetchIndexForPaymentDate(receiptIso);
+          indexMonth = formatIndexPeriodHebrew(idx?.period ?? null);
+        }
+        return {
+          receiptDate: receiptIso ?? s.name,
+          receiptAmount: s.receiptAmount,
+          principalPaid:
+            s.principalPaid != null ? round(s.principalPaid * lineVatMult) : null,
+          indexationPaid: indexationPaidGross,
+          interestPaid:
+            s.interestPaid != null ? round(s.interestPaid * lineVatMult) : null,
+          indexMonth: isRegistration ? null : indexMonth,
+          indexValue: isRegistration ? null : s.currentIndexValue,
+          indexChangePercent: isRegistration ? null : s.indexChangePercent,
+          indexationAmount: isRegistration ? null : indexationPaidGross,
+          visualStatus: 'paid' as const,
+        };
+      })
+    );
 
     for (const s of subitems) {
       const lineVat = s.vatPercent ?? vatPercent;
@@ -703,18 +728,6 @@ export async function buildPaymentStatement(
     }
 
     const latest = hasReceipts ? subitems[subitems.length - 1] : null;
-    const latestDate = latest ? parseSubitemNameToIsoDate(latest.name) : null;
-    let paidIndexMonth: string | null = null;
-    if (latestDate) {
-      const idx = await fetchIndexForPaymentDate(latestDate);
-      paidIndexMonth = formatIndexPeriodHebrew(idx?.period ?? null);
-    }
-    const paidIndexationGross = round(
-      subitems.reduce((sum, s) => {
-        const lineVatMult = vatGrossMultiplier(s.vatPercent ?? vatPercent);
-        return sum + round((s.indexationPaid ?? 0) * lineVatMult);
-      }, 0)
-    );
 
     // Fully paid: one contractual row with green receipt sub-rows
     if (isFullyPaid) {
@@ -722,10 +735,6 @@ export async function buildPaymentStatement(
         contractualDueDate: item.contractualDueDate,
         milestoneDescription: item.name,
         principalIncludingVat: extras.principalIncludingVat,
-        indexMonth: isRegistration ? null : paidIndexMonth,
-        indexValue: isRegistration ? null : (latest?.currentIndexValue ?? null),
-        indexChangePercent: isRegistration ? null : (latest?.indexChangePercent ?? null),
-        indexationAmount: isRegistration ? null : paidIndexationGross,
         receipts,
         currentBalance: 0,
         statusLabel: extras.paymentStatusLabel,
@@ -805,6 +814,10 @@ export async function buildPaymentStatement(
         principalPaid: residualPrincipalInclVat,
         indexationPaid: indexationAmount,
         interestPaid: interestInclVat,
+        indexMonth: isRegistration ? null : indexMonth,
+        indexValue: isRegistration ? null : indexValue,
+        indexChangePercent: isRegistration ? null : indexChangePercent,
+        indexationAmount: isRegistration ? null : indexationAmount,
         isRemainder: true,
         visualStatus,
       });
@@ -816,29 +829,15 @@ export async function buildPaymentStatement(
       // Always the full contractual principal — leftover lives in the יתרה sub-row
       principalIncludingVat:
         extras.principalIncludingVat ?? residualPrincipalInclVat,
-      indexMonth: isRegistration
-        ? null
-        : hasReceipts && visualStatus !== 'due'
-          ? paidIndexMonth
-          : indexMonth ?? paidIndexMonth,
-      indexValue: isRegistration
-        ? null
-        : hasReceipts && visualStatus !== 'due'
-          ? (latest?.currentIndexValue ?? null)
-          : indexValue ?? (latest?.currentIndexValue ?? null),
-      indexChangePercent: isRegistration
-        ? null
-        : hasReceipts && visualStatus !== 'due'
-          ? (latest?.indexChangePercent ?? null)
-          : indexChangePercent ?? (latest?.indexChangePercent ?? null),
-      indexationAmount: isRegistration
-        ? null
-        : visualStatus === 'due'
-          ? indexationAmount
-          : hasReceipts
-            ? paidIndexationGross
-            : indexationAmount,
-      receipts: hasReceipts ? receipts : emptyReceipts(),
+      receipts: hasReceipts
+        ? receipts
+        : emptyReceipts({
+            indexMonth: isRegistration ? null : indexMonth,
+            indexValue: isRegistration ? null : indexValue,
+            indexChangePercent: isRegistration ? null : indexChangePercent,
+            indexationAmount: isRegistration ? null : indexationAmount,
+            visualStatus,
+          }),
       currentBalance,
       statusLabel: extras.paymentStatusLabel,
       visualStatus,
