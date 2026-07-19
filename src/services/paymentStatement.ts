@@ -559,6 +559,45 @@ function emptyReceipts(index?: {
 }
 
 /**
+ * VAT rate for PDF display (all money columns are shown after VAT).
+ * Prefer the rate stored on payment subitems; if the milestone has no receipts yet,
+ * derive it from סכום מקורי כולל מע״מ ÷ קרן לפני מע״מ.
+ */
+function resolveDisplayVatRate(options: {
+  fromSubitems: number | null | undefined;
+  principalPreVat: number | null | undefined;
+  principalInclVat: number | null | undefined;
+  fallbackVat?: number | null;
+}): number {
+  const fromSub = options.fromSubitems;
+  if (fromSub != null && Number.isFinite(fromSub) && fromSub !== 0) {
+    return fromSub;
+  }
+
+  const pre = options.principalPreVat;
+  const incl = options.principalInclVat;
+  if (
+    pre != null &&
+    incl != null &&
+    Number.isFinite(pre) &&
+    Number.isFinite(incl) &&
+    Math.abs(pre) > 1e-9
+  ) {
+    const ratio = incl / pre;
+    // e.g. 1,880,000 / 1,593,220 ≈ 1.18 → return 0.18 (fraction; vatGrossMultiplier accepts it)
+    if (Number.isFinite(ratio) && ratio > 1.001) {
+      return ratio - 1;
+    }
+  }
+
+  if (options.fallbackVat != null && Number.isFinite(options.fallbackVat) && options.fallbackVat !== 0) {
+    return options.fallbackVat;
+  }
+
+  return 0;
+}
+
+/**
  * Indexation on remaining principal from the last receipt's index through today's index.
  * Presentation only — does not change allocation rules when applying payments.
  */
@@ -634,6 +673,8 @@ export async function buildPaymentStatement(
   let totalIndexationPaid = 0;
   let currentRemainingBalance = 0;
   let nextPaymentAssigned = false;
+  /** VAT learned from paid milestones — used when an unpaid line has no subitem VAT yet. */
+  let contractVatFallback: number | null = null;
 
   for (const item of contractualItems) {
     const isRegistration = item.paymentCategory === 'רישום זכויות';
@@ -642,10 +683,18 @@ export async function buildPaymentStatement(
       fetchPaymentSubitems(item.id, item.paymentCategory),
     ]);
 
-    const vatPercent = subitems.length > 0
-      ? (subitems[subitems.length - 1].vatPercent ?? 0)
-      : 0;
+    const vatFromSubitems =
+      subitems.length > 0 ? (subitems[subitems.length - 1].vatPercent ?? null) : null;
+    const vatPercent = resolveDisplayVatRate({
+      fromSubitems: vatFromSubitems,
+      principalPreVat: item.principal,
+      principalInclVat: extras.principalIncludingVat,
+      fallbackVat: contractVatFallback,
+    });
     const vatMult = vatGrossMultiplier(vatPercent);
+    if (vatPercent !== 0) {
+      contractVatFallback = vatPercent;
+    }
 
     const receipts: PaymentReceiptRow[] = await Promise.all(
       subitems.map(async (s) => {
