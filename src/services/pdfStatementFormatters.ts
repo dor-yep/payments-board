@@ -102,6 +102,19 @@ export function ltr(value: string, className = 'num'): string {
   return `<span class="${className}" dir="ltr">${escapeHtml(value)}</span>`;
 }
 
+/**
+ * Renders a Hebrew date with the day/month on the first line and the full year
+ * on a second line, so the year is never truncated in narrow table columns.
+ */
+export function ltrDateStacked(dateStr: string | null | undefined): string {
+  const formatted = formatDateHe(dateStr);
+  if (formatted === '--') return `<span class="num">--</span>`;
+  const match = formatted.match(/^(\d{2}\/\d{2})\/(\d{4})$/);
+  if (!match) return `<span class="num" dir="ltr">${escapeHtml(formatted)}</span>`;
+  const [, dayMonth, year] = match;
+  return `<span class="num date-stacked" dir="ltr"><span class="date-dm">${escapeHtml(dayMonth)}</span><span class="date-year">${escapeHtml(year)}</span></span>`;
+}
+
 export function text(value: unknown): string {
   return escapeHtml(normalizeDisplayText(value));
 }

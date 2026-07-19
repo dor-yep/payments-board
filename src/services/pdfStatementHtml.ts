@@ -11,6 +11,7 @@ import {
   formatNumber,
   formatPercent,
   ltr,
+  ltrDateStacked,
   normalizeDisplayText,
   text,
 } from './pdfStatementFormatters.js';
@@ -46,6 +47,7 @@ function amountClass(status: PaymentVisualStatus): string {
 function receiptRows(row: PaymentStatementRow): PaymentStatementRow['receipts'] {
   const withData = row.receipts.filter(
     (r) =>
+      r.isRemainder ||
       r.receiptDate != null ||
       r.receiptAmount != null ||
       r.principalPaid != null ||
@@ -61,18 +63,35 @@ function receiptRows(row: PaymentStatementRow): PaymentStatementRow['receipts'] 
   }];
 }
 
+function receiptVisualStatus(
+  receipt: PaymentStatementRow['receipts'][number],
+  rowStatus: PaymentVisualStatus
+): PaymentVisualStatus {
+  if (receipt.visualStatus) return receipt.visualStatus;
+  if (receipt.isRemainder) return rowStatus;
+  const looksLikeActualReceipt =
+    receipt.receiptDate != null ||
+    receipt.receiptAmount != null ||
+    receipt.principalPaid != null;
+  return looksLikeActualReceipt ? 'paid' : rowStatus;
+}
+
 function renderReceiptCells(
   receipt: PaymentStatementRow['receipts'][number],
-  visualStatus: PaymentVisualStatus
+  rowStatus: PaymentVisualStatus
 ): string {
+  const status = receiptVisualStatus(receipt, rowStatus);
   const valueClass =
-    visualStatus === 'paid'
+    status === 'paid'
       ? 'amount-paid'
-      : visualStatus === 'due'
+      : status === 'due'
         ? 'amount-due'
         : 'amount-default';
+  const dateCell = receipt.isRemainder
+    ? `<td class="${valueClass} cell-remainder">${text('יתרה')}</td>`
+    : `<td class="${valueClass}">${ltr(formatDateHe(receipt.receiptDate))}</td>`;
   return `
-    <td class="${valueClass}">${ltr(formatDateHe(receipt.receiptDate))}</td>
+    ${dateCell}
     <td class="${valueClass}">${ltr(formatCurrency(receipt.receiptAmount))}</td>
     <td class="${valueClass}">${ltr(formatCurrency(receipt.principalPaid))}</td>
     <td class="${valueClass}">${ltr(formatCurrency(receipt.indexationPaid))}</td>
@@ -85,17 +104,22 @@ function renderPaymentRows(rows: PaymentStatementRow[]): string {
     .map((row, groupIndex) => {
       const receipts = receiptRows(row);
       const rowSpan = receipts.length;
+      const hasPaidReceipts = receipts.some((r) => !r.isRemainder);
       const alt = groupIndex % 2 === 1 ? 'row-alt' : '';
-      const due = row.visualStatus === 'due' ? 'row-due' : '';
-      const dueClass = row.visualStatus === 'due' ? 'amount-due' : '';
+      // Pure unpaid next payment: paint non-identity data red.
+      // Partial (paid receipts + יתרה): only the remainder sub-row and balance/index are red.
+      const fullRowDue = row.visualStatus === 'due' && !hasPaidReceipts;
+      const due = fullRowDue ? 'row-due' : '';
+      const principalClass = fullRowDue ? 'amount-due' : '';
+      const indexClass = row.visualStatus === 'due' ? 'amount-due' : '';
       const mergedStart = `
-        <td rowspan="${rowSpan}" class="cell-center cell-identity">${ltr(formatDateHe(row.contractualDueDate))}</td>
+        <td rowspan="${rowSpan}" class="cell-center cell-identity">${ltrDateStacked(row.contractualDueDate)}</td>
         <td rowspan="${rowSpan}" class="cell-wrap cell-identity">${text(row.milestoneDescription)}</td>
-        <td rowspan="${rowSpan}" class="cell-num ${dueClass}">${ltr(formatCurrency(row.principalIncludingVat))}</td>
-        <td rowspan="${rowSpan}" class="${dueClass}">${text(row.indexMonth ?? '--')}</td>
-        <td rowspan="${rowSpan}" class="cell-center ${dueClass}">${ltr(formatNumber(row.indexValue))}</td>
-        <td rowspan="${rowSpan}" class="cell-center ${dueClass}">${ltr(formatPercent(row.indexChangePercent))}</td>
-        <td rowspan="${rowSpan}" class="cell-num ${dueClass}">${ltr(formatCurrency(row.indexationAmount))}</td>
+        <td rowspan="${rowSpan}" class="cell-num ${principalClass}">${ltr(formatCurrency(row.principalIncludingVat))}</td>
+        <td rowspan="${rowSpan}" class="${indexClass}">${text(row.indexMonth ?? '--')}</td>
+        <td rowspan="${rowSpan}" class="cell-center ${indexClass}">${ltr(formatNumber(row.indexValue))}</td>
+        <td rowspan="${rowSpan}" class="cell-center ${indexClass}">${ltr(formatPercent(row.indexChangePercent))}</td>
+        <td rowspan="${rowSpan}" class="cell-num ${indexClass}">${ltr(formatCurrency(row.indexationAmount))}</td>
       `;
       const mergedEnd = `
         <td rowspan="${rowSpan}" class="cell-num ${amountClass(row.visualStatus)}">${ltr(formatCurrency(row.currentBalance))}</td>
@@ -115,7 +139,7 @@ function renderPaymentRows(rows: PaymentStatementRow[]): string {
           .slice(1)
           .map(
             (receipt) => `
-        <tr class="${alt} ${due}">
+        <tr class="${alt} ${due} ${receipt.isRemainder && row.visualStatus === 'due' ? 'row-remainder-due' : ''}">
           ${renderReceiptCells(receipt, row.visualStatus)}
         </tr>`
           )
@@ -372,9 +396,21 @@ export function buildPaymentStatementHtml(
       max-width: 100%;
     }
 
+    .date-stacked {
+      line-height: 1.15;
+      white-space: nowrap;
+    }
+    .date-stacked .date-dm,
+    .date-stacked .date-year {
+      display: block;
+      text-align: center;
+      white-space: nowrap;
+    }
+
     .amount-paid { color: #276749; }
     .amount-due { color: #c53030; font-weight: 700; }
     .amount-default { color: #2d3748; }
+    .cell-remainder { font-weight: 700; }
 
     .badge {
       display: inline-block;

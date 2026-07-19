@@ -182,6 +182,10 @@ export interface PaymentReceiptRow {
   principalPaid: number | null;
   indexationPaid: number | null;
   interestPaid: number | null;
+  /** Leftover balance sub-row (not an actual Monday receipt). */
+  isRemainder?: boolean;
+  /** Per-sub-row color; paid receipts stay green, יתרה can be red. */
+  visualStatus?: PaymentVisualStatus;
 }
 
 export interface PaymentStatementRow {
@@ -643,6 +647,7 @@ export async function buildPaymentStatement(
           s.indexationPaid != null ? round(s.indexationPaid * lineVatMult) : null,
         interestPaid:
           s.interestPaid != null ? round(s.interestPaid * lineVatMult) : null,
+        visualStatus: 'paid' as const,
       };
     });
 
@@ -684,7 +689,6 @@ export async function buildPaymentStatement(
       (extras.paymentStatusLabel === 'הושלם' ||
         balancePreVat === 0);
     const hasReceipts = subitems.length > 0;
-    const isPartial = hasReceipts && !isFullyPaid;
 
     if (isCredit) {
       logger.info('Payment statement credit row detected', {
@@ -712,8 +716,8 @@ export async function buildPaymentStatement(
       }, 0)
     );
 
-    // ── Paid portion (green): existing receipts on this contractual payment ──
-    if (hasReceipts) {
+    // Fully paid: one contractual row with green receipt sub-rows
+    if (isFullyPaid) {
       rows.push({
         contractualDueDate: item.contractualDueDate,
         milestoneDescription: item.name,
@@ -729,13 +733,10 @@ export async function buildPaymentStatement(
         statusBadge: statusBadgeFor('paid', item.paymentCategory),
         paymentCategory: item.paymentCategory,
       });
-    }
-
-    if (isFullyPaid) {
       continue;
     }
 
-    // ── Remaining / next / future / open-credit unpaid portion ──
+    // ── Unpaid remainder (same contractual row; as a red יתרה sub-row when partial) ──
     // Credits and registration lines never take the red "next apartment payment" slot
     const isNextPayment =
       !nextPaymentAssigned && !isCredit && !isRegistration;
@@ -744,9 +745,10 @@ export async function buildPaymentStatement(
     let indexValue: number | null = null;
     let indexChangePercent: number | null = null;
     let indexationAmount: number | null = null;
+    let interestInclVat: number | null = null;
     let currentBalance: number | null = null;
     // Preserve sign so negative credits display as negative amounts
-    let residualPrincipalInclVat: number | null = round(remainingPrincipalRaw * vatMult);
+    const residualPrincipalInclVat = round(remainingPrincipalRaw * vatMult);
 
     if (isNextPayment) {
       visualStatus = 'due';
@@ -765,6 +767,7 @@ export async function buildPaymentStatement(
       );
       const interestPreVat = Math.max(remaining.interest, 0);
       const indexationPreVat = accrued.indexation;
+      interestInclVat = round(interestPreVat * vatMult);
       currentBalance = round(
         (remainingPrincipalPositive + interestPreVat + indexationPreVat) * vatMult
       );
@@ -780,6 +783,7 @@ export async function buildPaymentStatement(
       indexValue = null;
       indexChangePercent = null;
       indexationAmount = null;
+      interestInclVat = null;
     } else {
       visualStatus = 'future';
       currentBalance = residualPrincipalInclVat;
@@ -787,26 +791,54 @@ export async function buildPaymentStatement(
       indexValue = null;
       indexChangePercent = null;
       indexationAmount = null;
+      interestInclVat = null;
     }
 
     currentRemainingBalance += currentBalance ?? 0;
 
-    const residualDescription = isPartial
-      ? `${item.name} — יתרה`
-      : item.name;
+    // When there are already actual receipts, append leftover as a sub-row (like another receipt)
+    // instead of duplicating the contractual payment as a second parent row.
+    if (hasReceipts) {
+      receipts.push({
+        receiptDate: null,
+        receiptAmount: currentBalance,
+        principalPaid: residualPrincipalInclVat,
+        indexationPaid: indexationAmount,
+        interestPaid: interestInclVat,
+        isRemainder: true,
+        visualStatus,
+      });
+    }
 
     rows.push({
       contractualDueDate: item.contractualDueDate,
-      milestoneDescription: residualDescription,
+      milestoneDescription: item.name,
+      // Always the full contractual principal — leftover lives in the יתרה sub-row
       principalIncludingVat:
-        isPartial || isCredit
-          ? residualPrincipalInclVat
-          : (extras.principalIncludingVat ?? residualPrincipalInclVat),
-      indexMonth,
-      indexValue,
-      indexChangePercent,
-      indexationAmount,
-      receipts: emptyReceipts(),
+        extras.principalIncludingVat ?? residualPrincipalInclVat,
+      indexMonth: isRegistration
+        ? null
+        : hasReceipts && visualStatus !== 'due'
+          ? paidIndexMonth
+          : indexMonth ?? paidIndexMonth,
+      indexValue: isRegistration
+        ? null
+        : hasReceipts && visualStatus !== 'due'
+          ? (latest?.currentIndexValue ?? null)
+          : indexValue ?? (latest?.currentIndexValue ?? null),
+      indexChangePercent: isRegistration
+        ? null
+        : hasReceipts && visualStatus !== 'due'
+          ? (latest?.indexChangePercent ?? null)
+          : indexChangePercent ?? (latest?.indexChangePercent ?? null),
+      indexationAmount: isRegistration
+        ? null
+        : visualStatus === 'due'
+          ? indexationAmount
+          : hasReceipts
+            ? paidIndexationGross
+            : indexationAmount,
+      receipts: hasReceipts ? receipts : emptyReceipts(),
       currentBalance,
       statusLabel: extras.paymentStatusLabel,
       visualStatus,
