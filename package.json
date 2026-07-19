@@ -15,9 +15,11 @@
     "deploy:versions": "npx @mondaycom/apps-cli app-version:list -a 11007042"
   },
   "dependencies": {
+    "@sparticuz/chromium": "^149.0.0",
     "dotenv": "^17.3.1",
     "express": "^4.21.0",
-    "puppeteer": "^25.3.0"
+    "puppeteer": "^25.3.0",
+    "puppeteer-core": "^25.3.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
