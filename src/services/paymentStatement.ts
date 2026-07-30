@@ -33,12 +33,34 @@ function parseNumeric(value: string | null | undefined): number | null {
   if (value == null || value.trim() === '') return null;
   try {
     const parsed = JSON.parse(value);
-    const num = parseFloat(parsed.value ?? parsed);
-    return Number.isFinite(num) ? num : null;
+    if (typeof parsed === 'number') return Number.isFinite(parsed) ? parsed : null;
+    if (typeof parsed === 'string') return parseMoneyString(parsed);
+    if (parsed && typeof parsed === 'object' && parsed.value != null) {
+      return parseMoneyString(String(parsed.value));
+    }
+    return null;
   } catch {
-    const num = parseFloat(value);
-    return Number.isFinite(num) ? num : null;
+    return parseMoneyString(value);
   }
+}
+
+/** Parse a display/money string like "₪2,550,000" or "2550000". */
+function parseMoneyString(raw: string | null | undefined): number | null {
+  if (raw == null) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  let s = trimmed.replace(/[₪\s]/g, '');
+  // US-style thousands: 2,550,000 or 2,550,000.50
+  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) {
+    s = s.replace(/,/g, '');
+  } else if (/^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(s)) {
+    // EU-style thousands: 2.550.000 or 2.550.000,50
+    s = s.replace(/\./g, '').replace(',', '.');
+  } else {
+    s = s.replace(/,/g, '');
+  }
+  const num = Number(s);
+  return Number.isFinite(num) ? num : null;
 }
 
 function parseDate(value: string | null | undefined): string | null {
@@ -88,13 +110,36 @@ function parseBoardRelationIds(
   }
 }
 
-function parseLookupNumeric(value: string | null | undefined, text?: string | null): number | null {
-  const fromValue = parseNumeric(value);
-  if (fromValue != null) return fromValue;
-  const fromText = text?.trim();
-  if (!fromText) return null;
-  const cleaned = fromText.replace(/[₪,\s]/g, '');
-  return parseNumeric(cleaned);
+/**
+ * Prefer display_value for Monday lookup/mirror columns (the cell total you see in the UI).
+ * Never trust raw `value` JSON or a comma-joined list of linked line items — stripping
+ * commas from that list used to produce garbage like ₪3,400,500,000+.
+ */
+function parseLookupNumeric(
+  value: string | null | undefined,
+  text?: string | null,
+  displayValue?: string | null
+): number | null {
+  const fromDisplay = parseMoneyString(displayValue ?? null);
+  if (fromDisplay != null) return fromDisplay;
+
+  // `text` is OK only when it is a single money amount (not "a, b, c" linked rows)
+  if (text?.trim() && !looksLikeMultipleAmounts(text)) {
+    const fromText = parseMoneyString(text);
+    if (fromText != null) return fromText;
+  }
+
+  // Raw value only if it clearly encodes one number
+  return parseNumeric(value);
+}
+
+function looksLikeMultipleAmounts(raw: string): boolean {
+  // More than one currency symbol, or several thousand-grouped numbers separated by commas
+  if ((raw.match(/₪/g) ?? []).length > 1) return true;
+  const chunks = raw.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
+  if (chunks.length <= 1) return false;
+  const numericChunks = chunks.filter((c) => /[\d]/.test(c));
+  return numericChunks.length > 1;
 }
 
 type ColumnValueWithMirror = {
@@ -283,6 +328,9 @@ async function fetchContractHeader(contractId: number): Promise<ContractHeaderRa
           ... on MirrorValue {
             display_value
           }
+          ... on LookupValue {
+            display_value
+          }
           ... on DateValue {
             date
           }
@@ -316,11 +364,7 @@ async function fetchContractHeader(contractId: number): Promise<ContractHeaderRa
     } else if (cv.id === cols.contractNumber) {
       contractNumber = parseText(cv.value, cv.text);
     } else if (cv.id === cols.totalContractAmount) {
-      totalContractAmount = parseNumeric(cv.value) ?? parseNumeric(cv.text ?? null);
-      if (totalContractAmount == null) {
-        const asText = parseText(cv.value, cv.text);
-        if (asText) totalContractAmount = parseNumeric(asText);
-      }
+      totalContractAmount = parseLookupNumeric(cv.value, cv.text, cv.display_value);
     }
   }
 
@@ -358,6 +402,9 @@ async function fetchApartmentDetails(
           ... on MirrorValue {
             display_value
           }
+          ... on LookupValue {
+            display_value
+          }
         }
       }
     }
@@ -380,8 +427,15 @@ async function fetchApartmentDetails(
 
   let buildingName: string | null = buildingCv?.text?.trim() || buildingCv?.display_value?.trim() || null;
   const originalApartmentPrice = priceCv
-    ? parseLookupNumeric(priceCv.value, priceCv.text ?? priceCv.display_value)
+    ? parseLookupNumeric(priceCv.value, priceCv.text, priceCv.display_value)
     : null;
+
+  logger.info('Fetched original apartment price', {
+    apartmentId,
+    originalApartmentPrice,
+    priceText: priceCv?.text ?? null,
+    priceDisplay: priceCv?.display_value ?? null,
+  });
 
   if (buildingIds.length > 0) {
     const buildingQuery = `
@@ -903,6 +957,16 @@ export async function buildPaymentStatement(
     .filter(Boolean)
     .join(', ');
 
+  const resolvedApartmentPrice =
+    apartmentDetails.originalApartmentPrice ?? contractHeader.totalContractAmount;
+
+  logger.info('Resolved מחיר דירה מקורי for PDF', {
+    contractItemId,
+    fromApartmentLookup: apartmentDetails.originalApartmentPrice,
+    fromContractFallback: contractHeader.totalContractAmount,
+    resolved: resolvedApartmentPrice,
+  });
+
   const data: PaymentStatementData = {
     header: {
       contractName: contractHeader.name,
@@ -911,17 +975,13 @@ export async function buildPaymentStatement(
       signingDate: contractHeader.signingDate,
       apartmentDescription: apartmentDescription || apartmentDetails.apartmentName,
       buildingName: apartmentDetails.buildingName,
-      totalContractAmount:
-        apartmentDetails.originalApartmentPrice ??
-        contractHeader.totalContractAmount,
+      totalContractAmount: resolvedApartmentPrice,
       baseIndex: contractDetails?.baseIndex ?? null,
       baseIndexPeriod: contractDetails?.baseIndexPeriod ?? null,
       generationDate: today,
     },
     summary: {
-      totalContractAmount:
-        apartmentDetails.originalApartmentPrice ??
-        contractHeader.totalContractAmount,
+      totalContractAmount: resolvedApartmentPrice,
       totalPrincipalPaid: round(totalPrincipalPaid),
       totalIndexationPaid: round(totalIndexationPaid),
       currentRemainingBalance: round(currentRemainingBalance),
