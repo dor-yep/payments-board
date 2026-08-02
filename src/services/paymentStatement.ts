@@ -111,35 +111,49 @@ function parseBoardRelationIds(
 }
 
 /**
- * Prefer display_value for Monday lookup/mirror columns (the cell total you see in the UI).
- * Never trust raw `value` JSON or a comma-joined list of linked line items — stripping
- * commas from that list used to produce garbage like ₪3,400,500,000+.
+ * Prefer display_value for Monday mirror/lookup columns (what the cell shows).
+ * When Monday returns a comma-separated list of linked amounts (common for mirrors),
+ * sum them — that matches the UI rollup total. Never strip commas across the whole
+ * list and parseFloat (that produced garbage like ₪3,400,500,000+).
  */
 function parseLookupNumeric(
   value: string | null | undefined,
   text?: string | null,
   displayValue?: string | null
 ): number | null {
-  const fromDisplay = parseMoneyString(displayValue ?? null);
-  if (fromDisplay != null) return fromDisplay;
-
-  // `text` is OK only when it is a single money amount (not "a, b, c" linked rows)
-  if (text?.trim() && !looksLikeMultipleAmounts(text)) {
-    const fromText = parseMoneyString(text);
-    if (fromText != null) return fromText;
+  for (const candidate of [displayValue, text]) {
+    if (!candidate?.trim()) continue;
+    if (looksLikeMultipleAmounts(candidate)) {
+      const sum = sumMoneyList(candidate);
+      if (sum != null) return sum;
+      continue;
+    }
+    const single = parseMoneyString(candidate);
+    if (single != null) return single;
   }
-
-  // Raw value only if it clearly encodes one number
   return parseNumeric(value);
 }
 
 function looksLikeMultipleAmounts(raw: string): boolean {
-  // More than one currency symbol, or several thousand-grouped numbers separated by commas
   if ((raw.match(/₪/g) ?? []).length > 1) return true;
   const chunks = raw.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
   if (chunks.length <= 1) return false;
   const numericChunks = chunks.filter((c) => /[\d]/.test(c));
   return numericChunks.length > 1;
+}
+
+/** Sum comma-separated money fragments from a mirror display_value. */
+function sumMoneyList(raw: string): number | null {
+  const chunks = raw.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
+  let sum = 0;
+  let count = 0;
+  for (const chunk of chunks) {
+    const n = parseMoneyString(chunk);
+    if (n == null) continue;
+    sum += n;
+    count += 1;
+  }
+  return count > 0 ? round(sum) : null;
 }
 
 type ColumnValueWithMirror = {
@@ -328,9 +342,6 @@ async function fetchContractHeader(contractId: number): Promise<ContractHeaderRa
           ... on MirrorValue {
             display_value
           }
-          ... on LookupValue {
-            display_value
-          }
           ... on DateValue {
             date
           }
@@ -400,9 +411,6 @@ async function fetchApartmentDetails(
             linked_item_ids
           }
           ... on MirrorValue {
-            display_value
-          }
-          ... on LookupValue {
             display_value
           }
         }
